@@ -10,34 +10,19 @@ operation from the design notes:
         with the grouping value v = phi_G(event) computed on the fly
         by every downstream operation.
 
-    promote_to_l2
-        L1 -> L2: compute intra-group positions (ordered by timestamp
-        within each group) and write a compact positions overlay table
-        that maps (original trace_id, original position) → (group_value,
-        group_pos).  Bootstrap the SequenceMetadata table that tracks
-        the last assigned position per group for incremental updates.
-
     build_pair_transient
         On-demand pair extraction for the query planner.  Reads the
-        shared SequenceTable, computes phi_G on the fly, optionally
-        joins with the positions overlay (L2), and runs STNM extraction
-        for one (A, B) pair without writing to Delta.
+        shared SequenceTable, computes phi_G on the fly, and runs STNM
+        extraction for one (A, B) pair without writing to Delta.
 
     build_pair_persistent
         Full historical build for one (A, B) pair at L3.  Same read
         path as build_pair_transient, writes to the per-pair PairsIndex
         Delta table, and bootstraps the perspective's LastChecked table.
 
-    incremental_update_perspective
-        Per-batch maintenance.  At L1 this is a no-op (reads happen
-        directly from the shared table).  At L2 new intra-group
-        positions are computed for every new event and appended to the
-        positions overlay; SequenceMetadata is updated via MERGE.
-
     incremental_update_persistent_pairs
         Per-batch maintenance for all L3 pair indices under one
-        perspective.  Calls incremental_update_perspective for L2
-        bookkeeping, then for each persistent (A, B) pair runs the
+        perspective: for each persistent (A, B) pair, runs the
         LastChecked-guided STNM extraction and appends new records to
         the per-pair PairsIndex.  Returns a dict {(A, B): elapsed_ms}.
 
@@ -47,11 +32,6 @@ Storage layout (all relative to s3a://{namespace}/{log_name}/):
                                     (trace_id = original case ID,
                                      position = intra-trace position)
 
-    adaptive/{pid}/positions/       L2 only — compact positions overlay
-                                    schema: trace_id, position,
-                                            group_value, group_pos
-                                    partitioned by group_value
-    adaptive/{pid}/sequence_metadata/  group_value -> last_pos  (L2)
     adaptive/{pid}/pairs/{A}__{B}/  per-pair PairsIndex
     adaptive/{pid}/last_checked/    LastChecked for all L3 pairs
 
@@ -63,19 +43,11 @@ perspective owned a full copy of the event data.  The grouping value
 v = phi_G(event) is computed on the fly whenever the shared table is
 read; no materialised per-perspective sequence table exists.
 
-At L2, intra-group positions are stored in a compact positions overlay
-that contains only the identity columns (trace_id, original position)
-plus (group_value, group_pos) — no event attributes are duplicated.
-The helper _get_perspective_seq_df assembles the correct DataFrame for
-STNM computation by joining the shared table with the overlay and
-renaming columns so that downstream functions see the familiar
-(trace_id = group_value, position = group_pos) schema.
-
-Position semantics: at L1 (has_pos=False) _get_perspective_seq_df ranks
-each group's full event sequence by timestamp (ties: activity, trace_id,
-position), before any activity filter, so every pair table of a perspective
-uses the same positions.  At L2 (has_pos=True) group_pos values from the
-overlay are used.
+Position semantics: _get_perspective_seq_df ranks each group's full event
+sequence by timestamp (ties: trace_id, position), before any activity
+filter, so every pair table of a perspective uses the same positions.
+No positions are stored per perspective: pair records carry them, so
+only cold reads rank.
 """
 
 from __future__ import annotations
@@ -87,11 +59,9 @@ from typing import Dict, List, Optional, Tuple
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.functions import (
-    coalesce,
     col,
     concat_ws,
     lit,
-    row_number,
     when,
 )
 from pyspark.sql.types import StringType
@@ -127,15 +97,6 @@ def _adaptive_root(metadata: MetaData, pid: str) -> str:
         f"s3a://{metadata.storage_namespace}"
         f"/{metadata.log_name}/adaptive/{pid}"
     )
-
-
-def _perspective_positions_path(metadata: MetaData, pid: str) -> str:
-    """Compact L2 positions overlay: (trace_id, position) → (group_value, group_pos)."""
-    return f"{_adaptive_root(metadata, pid)}/positions"
-
-
-def _perspective_seq_metadata_path(metadata: MetaData, pid: str) -> str:
-    return f"{_adaptive_root(metadata, pid)}/sequence_metadata"
 
 
 def _perspective_pair_path(
@@ -200,25 +161,21 @@ def _get_perspective_seq_df(
     grouping_keys: List[str],
     metadata: MetaData,
     storage: StorageManager,
-    has_pos: bool,
     group_ids_filter: Optional[List[str]] = None,
     group_ids_df: Optional[DataFrame] = None,
 ) -> DataFrame:
     """
     Return a DataFrame suitable for STNM pair extraction under perspective pid.
 
-    Reads the shared SequenceTable, computes phi_G on the fly, and —
-    if the perspective is at L2 — joins with the compact positions
-    overlay to attach intra-group positions.
+    Reads the shared SequenceTable and computes phi_G on the fly.
 
     Output schema
     -------------
     trace_id (= group_value), activity, start_timestamp, attributes, position
 
-    ``position`` is the intra-group position: the positions overlay's
-    ``group_pos`` at L2, and otherwise the event's rank within its group
-    ordered by (start_timestamp, activity, trace_id, position).  The L1 rank
-    is computed over the group's full sequence, before any activity filter,
+    ``position`` is the intra-group position: the event's rank within its
+    group ordered by (start_timestamp, trace_id, position).  The rank is
+    computed over the group's full sequence, before any activity filter,
     so pair tables built from filtered reads (e.g. batched transient builds)
     agree with those built from full reads.
 
@@ -232,66 +189,32 @@ def _get_perspective_seq_df(
                        scales to many groups where ``isin`` does not.
                        Whole groups are kept, so positions are unchanged.
     """
-    spark = get_spark_session()
     shared_df = storage.read_sequence_table(metadata)
 
-    if has_pos:
-        pos_path = _perspective_positions_path(metadata, pid)
-        try:
-            pos_df = spark.read.format("delta").load(pos_path)
-        except Exception as exc:
-            raise RuntimeError(
-                f"_get_perspective_seq_df: positions table for '{pid}' "
-                f"not found at {pos_path}.  "
-                "Was promote_to_l2 called first?"
-            ) from exc
-
-        if group_ids_filter:
-            pos_df = pos_df.filter(col("group_value").isin(group_ids_filter))
-        if group_ids_df is not None:
-            pos_df = pos_df.join(
-                group_ids_df.select(col("trace_id").alias("group_value")),
-                on="group_value", how="left_semi",
-            )
-
-        # Join on the original event identity (trace_id, intra-trace position).
-        joined = shared_df.join(
-            pos_df.select("trace_id", "position", "group_value", "group_pos"),
-            on=["trace_id", "position"],
-            how="inner",
+    result = (
+        shared_df
+        .withColumn("group_value", _grouping_col(grouping_keys))
+        .filter(col("group_value").isNotNull())
+    )
+    if group_ids_filter:
+        result = result.filter(col("group_value").isin(group_ids_filter))
+    if group_ids_df is not None:
+        result = result.join(
+            group_ids_df.select(col("trace_id").alias("group_value")),
+            on="group_value", how="left_semi",
         )
-        return joined.select(
-            col("group_value").alias("trace_id"),
-            col("activity"),
-            col("start_timestamp"),
-            col("attributes"),
-            col("group_pos").alias("position"),
-        )
-    else:
-        result = (
-            shared_df
-            .withColumn("group_value", _grouping_col(grouping_keys))
-            .filter(col("group_value").isNotNull())
-        )
-        if group_ids_filter:
-            result = result.filter(col("group_value").isin(group_ids_filter))
-        if group_ids_df is not None:
-            result = result.join(
-                group_ids_df.select(col("trace_id").alias("group_value")),
-                on="group_value", how="left_semi",
-            )
-        # Timestamp ties keep the trace order (trace_id, position), as in the
-        # eager index; the L1/L2 position windows below use the same order.
-        group_order = Window.partitionBy("group_value").orderBy(
-            col("start_timestamp"), col("trace_id"), col("position")
-        )
-        return result.select(
-            col("group_value").alias("trace_id"),
-            col("activity"),
-            col("start_timestamp"),
-            col("attributes"),
-            (F.row_number().over(group_order) - 1).alias("position"),
-        )
+    # Timestamp ties keep the trace order (trace_id, position), as in the
+    # eager index.
+    group_order = Window.partitionBy("group_value").orderBy(
+        col("start_timestamp"), col("trace_id"), col("position")
+    )
+    return result.select(
+        col("group_value").alias("trace_id"),
+        col("activity"),
+        col("start_timestamp"),
+        col("attributes"),
+        (F.row_number().over(group_order) - 1).alias("position"),
+    )
 
 
 # ===========================================================================
@@ -325,214 +248,6 @@ def promote_to_l1(
 
 
 # ===========================================================================
-# L1 -> L2 promotion
-# ===========================================================================
-
-def promote_to_l2(
-    pid: str,
-    grouping_keys: List[str],
-    metadata: MetaData,
-    storage: StorageManager,
-) -> float:
-    """
-    Build the compact positions overlay for the perspective.
-
-    Reads the shared SequenceTable, assigns a 0-indexed intra-group
-    position to each event within its group (ordered by start_timestamp),
-    writes the compact positions overlay (trace_id, original position,
-    group_value, group_pos) to Delta, and bootstraps SequenceMetadata
-    with the last assigned group_pos per group.
-
-    Returns
-    -------
-    float
-        Elapsed wall-clock time in milliseconds.
-    """
-    logger.info(
-        f"AdaptiveBuilders: promote_to_l2 for perspective '{pid}'."
-    )
-    t0 = time.time()
-    spark = get_spark_session()
-
-    seq_df = storage.read_sequence_table(metadata)
-
-    # Compute grouping value; filter events that don't carry the perspective's attributes.
-    grouped_df = (
-        seq_df
-        .withColumn("group_value", _grouping_col(grouping_keys))
-        .filter(col("group_value").isNotNull())
-    )
-
-    # Assign 0-indexed intra-group position ordered by timestamp.
-    window = Window.partitionBy("group_value").orderBy("start_timestamp", "trace_id", "position")
-    positioned_df = grouped_df.withColumn(
-        "group_pos", (row_number().over(window) - 1).cast("integer")
-    )
-
-    # Write compact positions overlay (no attributes — just identity + group info).
-    positions_path = _perspective_positions_path(metadata, pid)
-    (
-        positioned_df
-        .select(
-            col("trace_id"),   # original case ID
-            col("position"),   # original intra-trace position (join key)
-            col("group_value"),
-            col("group_pos"),
-        )
-        .write
-        .format("delta")
-        .partitionBy("group_value")
-        .mode("overwrite")
-        .save(positions_path)
-    )
-
-    # Bootstrap SequenceMetadata: group_value → last_pos.
-    meta_df = (
-        positioned_df
-        .groupBy("group_value")
-        .agg(F.max("group_pos").cast("integer").alias("last_pos"))
-        .withColumnRenamed("group_value", "trace_id")
-    )
-    meta_path = _perspective_seq_metadata_path(metadata, pid)
-    meta_df.write.format("delta").mode("overwrite").save(meta_path)
-
-    elapsed = (time.time() - t0) * 1000
-    logger.info(
-        f"AdaptiveBuilders: L2 promotion for '{pid}' completed in "
-        f"{elapsed:.1f}ms."
-    )
-    return elapsed
-
-
-# ===========================================================================
-# Per-batch perspective maintenance
-# ===========================================================================
-
-def incremental_update_perspective(
-    pid: str,
-    grouping_keys: List[str],
-    batch_activity_df: DataFrame,
-    metadata: MetaData,
-    storage: StorageManager,
-    has_pos: bool,
-) -> Tuple[float, float]:
-    """
-    Update perspective bookkeeping for the current ingest batch.
-
-    At L1 (has_pos=False) this is a no-op: the shared SequenceTable is
-    kept current by the eager indexer, and reads always go to that table.
-
-    At L2 (has_pos=True) new intra-group positions are computed for
-    every qualifying event in the batch and appended to the compact
-    positions overlay.  SequenceMetadata is updated via MERGE so that
-    subsequent batches continue from the correct offset.
-
-    Returns
-    -------
-    Tuple[float, float]
-        (l1_ms, l2_ms) — same interface as before for retention accounting.
-        Both are 0.0 at L1.
-    """
-    if not has_pos:
-        return 0.0, 0.0
-
-    spark = get_spark_session()
-    t1 = time.time()
-
-    # Compute group value for each new event, keeping original trace_id and position.
-    new_events = (
-        batch_activity_df
-        .withColumn("group_value", _grouping_col(grouping_keys))
-        .filter(col("group_value").isNotNull())
-    )
-
-    l1_ms = (time.time() - t1) * 1000
-
-    # ------------------------------------------------------------------
-    # Phase 2: extend intra-group positions from SequenceMetadata.
-    # ------------------------------------------------------------------
-    t2 = time.time()
-
-    meta_path = _perspective_seq_metadata_path(metadata, pid)
-    try:
-        meta_df = spark.read.format("delta").load(meta_path)
-    except Exception:
-        meta_df = spark.createDataFrame([], schema=_seq_metadata_schema())
-
-    # Join to get the last_pos for each affected group (default -1 → first pos = 0).
-    new_events_with_offset = (
-        new_events
-        .join(
-            meta_df.select(
-                col("trace_id").alias("group_key"),
-                col("last_pos"),
-            ),
-            col("group_value") == col("group_key"),
-            how="left",
-        )
-        .withColumn(
-            "last_pos",
-            coalesce(col("last_pos"), lit(-1)).cast("integer"),
-        )
-        .drop("group_key")
-    )
-
-    window = Window.partitionBy("group_value").orderBy("start_timestamp", "trace_id", "position")
-    new_events_positioned = new_events_with_offset.withColumn(
-        "group_pos",
-        (col("last_pos") + row_number().over(window)).cast("integer"),
-    ).drop("last_pos")
-
-    # Append compact positions (no attributes) to the positions overlay.
-    positions_path = _perspective_positions_path(metadata, pid)
-    (
-        new_events_positioned
-        .select(
-            col("trace_id"),   # original case ID
-            col("position"),   # original intra-trace position
-            col("group_value"),
-            col("group_pos"),
-        )
-        .write
-        .format("delta")
-        .partitionBy("group_value")
-        .mode("append")
-        .option("mergeSchema", "true")
-        .save(positions_path)
-    )
-
-    # Update SequenceMetadata with the new last positions per group.
-    new_meta = (
-        new_events_positioned
-        .groupBy("group_value")
-        .agg(F.max("group_pos").cast("integer").alias("last_pos"))
-        .withColumnRenamed("group_value", "trace_id")
-    )
-    from delta.tables import DeltaTable
-    try:
-        dt = DeltaTable.forPath(spark, meta_path)
-        (
-            dt.alias("existing")
-            .merge(
-                new_meta.alias("incoming"),
-                "existing.trace_id = incoming.trace_id",
-            )
-            .whenMatchedUpdate(set={"last_pos": col("incoming.last_pos")})
-            .whenNotMatchedInsertAll()
-            .execute()
-        )
-    except Exception:
-        new_meta.write.format("delta").mode("append").save(meta_path)
-
-    l2_ms = (time.time() - t2) * 1000
-    logger.debug(
-        f"AdaptiveBuilders: '{pid}' positions updated "
-        f"(l1={l1_ms:.1f}ms, l2={l2_ms:.1f}ms)."
-    )
-    return l1_ms, l2_ms
-
-
-# ===========================================================================
 # L3: full historical pair build
 # ===========================================================================
 
@@ -545,15 +260,14 @@ def build_pair_persistent(
     grouping_keys: List[str],
     metadata: MetaData,
     storage: StorageManager,
-    has_pos: bool,
 ) -> float:
     """
     Build the full historical PairsIndex for (act_a, act_b) under
     perspective pid.
 
-    Reads the shared SequenceTable (joined with the positions overlay if
-    has_pos), extracts all STNM pairs, writes to the per-pair PairsIndex
-    Delta table, and bootstraps the perspective's LastChecked table.
+    Reads the shared SequenceTable, extracts all STNM pairs, writes to
+    the per-pair PairsIndex Delta table, and bootstraps the
+    perspective's LastChecked table.
 
     Returns
     -------
@@ -572,7 +286,6 @@ def build_pair_persistent(
         grouping_keys=grouping_keys,
         metadata=metadata,
         storage=storage,
-        has_pos=has_pos,
     )
 
     pairs_df, last_checked_df = _extract_single_pair_from_df(
@@ -582,7 +295,6 @@ def build_pair_persistent(
         lookback_str=lookback,
         previous_lc_df=None,
         batch_min_ts=None,
-        has_pos=has_pos,
     )
 
     if pairs_df.rdd.isEmpty():
@@ -625,7 +337,6 @@ def build_pair_transient(
     grouping_keys: List[str],
     metadata: MetaData,
     storage: StorageManager,
-    has_pos: bool,
 ) -> DataFrame:
     """
     Extract pairs for (act_a, act_b) under perspective pid on demand,
@@ -651,7 +362,6 @@ def build_pair_transient(
         grouping_keys=grouping_keys,
         metadata=metadata,
         storage=storage,
-        has_pos=has_pos,
         group_ids_filter=candidate_group_ids if candidate_group_ids else None,
     )
 
@@ -662,7 +372,6 @@ def build_pair_transient(
         lookback_str=lookback,
         previous_lc_df=None,
         batch_min_ts=None,
-        has_pos=has_pos,
     )
     return pairs_df
 
@@ -679,18 +388,14 @@ def incremental_update_persistent_pairs(
     persistent_pairs: List[Tuple[str, str]],
     lookback: str,
     lookback_mode: str,
-    has_pos: bool,
     metadata: MetaData,
     storage: StorageManager,
     timings: Optional[Dict[str, float]] = None,
 ) -> Dict[Tuple[str, str], float]:
     """
-    Maintain the positions overlay (L2 only) and all L3 pair indices
-    for one ingest batch.
-
-    At L1 the sequence-table bookkeeping is a no-op because the shared
-    SequenceTable is kept current by the eager indexer.  At L2 the
-    compact positions overlay is extended before pair extraction.
+    Maintain all L3 pair indices of a perspective for one ingest batch.
+    The shared SequenceTable is kept current by the eager indexer, so
+    there is no per-perspective bookkeeping.
 
     Only groups that received new events of a persistent pair's
     activities are re-read (Algorithm 1: updated groups V).  Their events,
@@ -701,8 +406,7 @@ def incremental_update_persistent_pairs(
     PairsIndex table (appends run concurrently) and the LastChecked rows
     of all pairs are merged in one MERGE.
 
-    ``timings``, when given, receives ``l2_ms`` (positions overlay),
-    ``extract_ms`` (read + extraction), ``write_ms`` (pair appends) and
+    ``timings``, when given, receives ``extract_ms`` (read + extraction), ``write_ms`` (pair appends) and
     ``last_checked_ms`` (LastChecked merge).
 
     Returns
@@ -719,19 +423,6 @@ def incremental_update_persistent_pairs(
     for k in ("extract_ms", "write_ms", "last_checked_ms"):
         timings[k] = 0.0
 
-    # ------------------------------------------------------------------
-    # Step 1: Update positions overlay for L2 perspectives.
-    # At L1 this is a no-op (0.0, 0.0).
-    # ------------------------------------------------------------------
-    _l1_ms, l2_ms = incremental_update_perspective(
-        pid=pid,
-        grouping_keys=grouping_keys,
-        batch_activity_df=batch_activity_df,
-        metadata=metadata,
-        storage=storage,
-        has_pos=has_pos,
-    )
-    timings["l2_ms"] = l2_ms
 
     if not persistent_pairs:
         return {}
@@ -774,7 +465,6 @@ def incremental_update_persistent_pairs(
                 grouping_keys=grouping_keys,
                 metadata=metadata,
                 storage=storage,
-                has_pos=has_pos,
                 group_ids_df=new_acts_df.select("trace_id"),
             )
             .filter(col("activity").isin(pair_acts))
@@ -808,7 +498,6 @@ def incremental_update_persistent_pairs(
             pairs=persistent_pairs,
             lookback_str=lookback,
             previous_lc_df=lc_slice,
-            has_pos=has_pos,
             new_acts_df=new_acts_df,
         )
         new_pairs_df = new_pairs_df.persist(StorageLevel.MEMORY_AND_DISK)
@@ -864,7 +553,6 @@ def build_pairs_persistent_batched(
     grouping_keys: List[str],
     metadata: MetaData,
     storage: StorageManager,
-    has_pos: bool,
 ) -> Dict[Tuple[str, str], float]:
     """
     Full historical PairsIndex build for many pairs with one read and one
@@ -888,12 +576,11 @@ def build_pairs_persistent_batched(
         grouping_keys=grouping_keys,
         metadata=metadata,
         storage=storage,
-        has_pos=has_pos,
     ).filter(col("activity").isin(pair_acts))
 
     pairs_df, lc_df, grouped_rdd = _extract_pairs_multi(
         seq_df=seq_df, pairs=pairs, lookback_str=lookback,
-        previous_lc_df=None, has_pos=has_pos,
+        previous_lc_df=None,
     )
     pairs_df = pairs_df.persist(StorageLevel.MEMORY_AND_DISK)
     lc_df = lc_df.persist(StorageLevel.MEMORY_AND_DISK)
@@ -1003,7 +690,6 @@ def _extract_pairs_multi(
     pairs: List[Tuple[str, str]],
     lookback_str: str,
     previous_lc_df: Optional[DataFrame],
-    has_pos: bool,
     new_acts_df: Optional[DataFrame] = None,
 ) -> Tuple[DataFrame, DataFrame]:
     """
@@ -1115,7 +801,6 @@ def build_pairs_transient_batched(
     grouping_keys: List[str],
     metadata: MetaData,
     storage: StorageManager,
-    has_pos: bool,
 ) -> Dict[Tuple[str, str], list]:
     """
     Transient extraction for MANY pairs with ONE SequenceTable scan and
@@ -1147,7 +832,6 @@ def build_pairs_transient_batched(
         grouping_keys=grouping_keys,
         metadata=metadata,
         storage=storage,
-        has_pos=has_pos,
         group_ids_filter=candidate_group_ids if candidate_group_ids else None,
     ).filter(_col("activity").isin(acts))
  
@@ -1156,7 +840,6 @@ def build_pairs_transient_batched(
         pairs=list(pairs),
         lookback_str=lookback,
         previous_lc_df=None,
-        has_pos=has_pos,
     )
     try:
         rows = pairs_df.collect()
@@ -1175,7 +858,6 @@ def _extract_single_pair_from_df(
     lookback_str: str,
     previous_lc_df: Optional[DataFrame],
     batch_min_ts: Optional[int],
-    has_pos: bool,
 ) -> Tuple[DataFrame, DataFrame]:
     """
     Extract all STNM instances of (act_a, act_b) from seq_df, guided by
@@ -1301,12 +983,3 @@ def _upsert_last_checked(
             .mode("overwrite")
             .save(lc_path)
         )
-
-
-def _seq_metadata_schema():
-    """Return the Spark schema for the SequenceMetadata table."""
-    from pyspark.sql.types import IntegerType, StringType, StructField, StructType
-    return StructType([
-        StructField("trace_id", StringType(),  False),  # group value v
-        StructField("last_pos", IntegerType(), False),
-    ])

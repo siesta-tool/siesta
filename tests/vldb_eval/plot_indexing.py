@@ -226,7 +226,7 @@ def _rolling_median(xs: list, k: int) -> list:
     return [statistics.median(xs[max(0, i - k + 1): i + 1]) for i in range(len(xs))]
 
 
-def _tier_brackets(ax, reps, sources):
+def _tier_brackets(ax, reps, sources, fontsize: float = 6):
     """ABSENT / TRANSIENT / PERSISTENT brackets over runs of equal tier."""
     runs = []
     for k, src in zip(reps, sources):
@@ -241,14 +241,21 @@ def _tier_brackets(ax, reps, sources):
         ax.plot([x0, x0, x1, x1], [0.95, 0.975, 0.975, 0.95], transform=trans,
                 color=TEXT2, linewidth=0.7, clip_on=False)
         ax.text((x0 + x1) / 2, 0.93, tier, transform=trans, ha="center", va="top",
-                fontsize=6, style="italic", color=TEXT2)
+                fontsize=fontsize, style="italic", color=TEXT2)
 
 
 def fig3(figs: Path, d1: dict, d2: dict) -> None:
+    """Paper style (EXP5_STYLE: Times-like serif, no grid), panels stacked so the figure
+    reads at single-column width; same width as fig_exp5 so both scale alike."""
     dss = [d for d in DATASET_ORDER if d in d1 or d in d2]
     if not dss:
         return
-    fig, (a, b) = plt.subplots(1, 2, figsize=(7.0, 2.6))
+    with plt.rc_context(EXP5_STYLE):
+        _fig3(figs, d1, d2, dss)
+
+
+def _fig3(figs: Path, d1: dict, d2: dict, dss: list) -> None:
+    fig, (a, b) = plt.subplots(2, 1, figsize=(4.2, 4.6))
 
     # (a) latency per repetition
     reps_ref, srcs_ref = None, None
@@ -272,10 +279,10 @@ def fig3(figs: Path, d1: dict, d2: dict) -> None:
         a.set_xlim(reps_ref[0] - 0.5, reps_ref[-1] + 0.5)
         lo, hi = a.get_ylim()
         a.set_ylim(lo, hi * 3)  # headroom for the tier brackets
-        _tier_brackets(a, reps_ref, srcs_ref)
+        _tier_brackets(a, reps_ref, srcs_ref, fontsize=8)
         a.set_xlabel("Query repetition (exposure)")
         a.set_ylabel("Query latency (s)")
-        a.text(-0.13, 1.0, "(a)", transform=a.transAxes, fontweight="bold", va="bottom")
+        a.text(-0.16, 1.0, "(a)", transform=a.transAxes, fontweight="bold", va="bottom")
 
     # (b) latency vs query position, skewed solid / uniform dashed
     for ds in [d for d in dss if d in d2]:
@@ -295,19 +302,20 @@ def fig3(figs: Path, d1: dict, d2: dict) -> None:
             b.axhline(statistics.median(e_all), color=c, linestyle=":", linewidth=0.9, alpha=0.9)
     b.set_yscale("log")
     b.set_xlabel("Query position")
-    b.set_ylabel(f"Latency (s), rolling median of {ROLLING}")
-    b.text(-0.13, 1.0, "(b)", transform=b.transAxes, fontweight="bold", va="bottom")
+    b.set_ylabel(f"Latency (s), rolling\nmedian of {ROLLING}")
+    b.text(-0.16, 1.0, "(b)", transform=b.transAxes, fontweight="bold", va="bottom")
 
     handles = [matplotlib.lines.Line2D([], [], color=DS_COLOR[d], marker=DS_MARKER[d],
                                        markerfacecolor=SURFACE, label=LABEL[d]) for d in dss]
     handles += [
         matplotlib.lines.Line2D([], [], color=TEXT, linestyle="-", label="skewed"),
         matplotlib.lines.Line2D([], [], color=TEXT, linestyle="--", label="uniform"),
-        matplotlib.lines.Line2D([], [], color=TEXT2, linestyle=":", label="eager SIESTA, case index (all pairs)"),
+        matplotlib.lines.Line2D([], [], color=TEXT2, linestyle=":", label="SIESTA"),
     ]
-    fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=5,
-               columnspacing=1.2, handlelength=2.2)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=3, fontsize=8,
+               labelspacing=0.2, columnspacing=0.8, handlelength=2.0, handletextpad=0.4,
+               borderaxespad=0.1, borderpad=0.1)
     fig.savefig(figs / "fig3_adaptation.pdf")
     plt.close(fig)
 
@@ -351,6 +359,12 @@ def fig_breakeven(figs: Path, d2: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def exp3(figs: Path, tabs: Path, panel_b_hot: int | None = None) -> None:
+    """Paper style (EXP5_STYLE), panels stacked for single-column width (see _exp3)."""
+    with plt.rc_context(EXP5_STYLE):
+        _exp3(figs, tabs, panel_b_hot)
+
+
+def _exp3(figs: Path, tabs: Path, panel_b_hot: int | None = None) -> None:
     """
     (a) latency vs position per hot-set size and uniform, with the
     materialisation position of each; (b) fraction PERSISTENT per round for
@@ -368,7 +382,7 @@ def exp3(figs: Path, tabs: Path, panel_b_hot: int | None = None) -> None:
         hots = sorted(setup["n_hot"])
         b_hot = panel_b_hot if panel_b_hot in hots else hots[len(hots) // 2]
 
-        fig, (a, b) = plt.subplots(1, 2, figsize=(7.0, 2.6))
+        fig, (a, b) = plt.subplots(2, 1, figsize=(4.2, 5.0))
         rows = []
         series = [(f"hot_{h}", SERIES[i], "-", "o",
                    f"$n_{{hot}}$ = {h} ({100 * h / space:.1f}%)") for i, h in enumerate(hots)]
@@ -407,13 +421,14 @@ def exp3(figs: Path, tabs: Path, panel_b_hot: int | None = None) -> None:
             a.axvline(mat, color=c, linestyle=":", linewidth=0.9)
         if mats:
             mat, _ = max(mats)
-            a.text(mat, top, " materialisation", color=TEXT2, fontsize=6, style="italic",
+            a.text(mat, top, " all pairs persisted", color=TEXT2, fontsize=8, style="italic",
                    va="top", ha="left")
         a.set_ylim(0, top)
         a.set_xlabel("Query position")
         a.set_ylabel(f"Hot-set query latency (s)\nrolling median of {ROLLING}")
-        a.text(-0.12, 1.0, "(a)", transform=a.transAxes, fontweight="bold", va="bottom")
-        a.legend(loc="upper center", bbox_to_anchor=(0.5, 1.22), ncol=2, fontsize=6.5)
+        a.text(-0.16, 1.0, "(a)", transform=a.transAxes, fontweight="bold", va="bottom")
+        a.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=8, labelspacing=0.2,
+                 columnspacing=0.8, handlelength=2.0, handletextpad=0.4, borderaxespad=0.2, borderpad=0.1)
 
         rb = sorted((r for r in rounds if r["workload"] == f"hot_{b_hot}"), key=lambda r: r["round"])
         ru = sorted((r for r in rounds if r["workload"] == "uniform"), key=lambda r: r["round"])
@@ -435,9 +450,10 @@ def exp3(figs: Path, tabs: Path, panel_b_hot: int | None = None) -> None:
         b.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
         b.set_xlabel("Query round")
         b.set_ylabel("Fraction PERSISTENT")
-        b.text(-0.12, 1.0, "(b)", transform=b.transAxes, fontweight="bold", va="bottom")
-        b.legend(loc="upper center", bbox_to_anchor=(0.5, 1.22), ncol=2, fontsize=6.5)
-        fig.tight_layout()
+        b.text(-0.16, 1.0, "(b)", transform=b.transAxes, fontweight="bold", va="bottom")
+        b.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=8, labelspacing=0.2,
+                 columnspacing=0.8, handlelength=2.0, handletextpad=0.4, borderaxespad=0.2, borderpad=0.1)
+        fig.tight_layout(h_pad=1.5)
         fig.savefig(figs / f"fig4_hotset_{ds}.pdf")
         plt.close(fig)
         write_table(f"tab_exp3_hotset_{ds}",
@@ -487,6 +503,7 @@ def exp4(figs: Path, tabs: Path) -> None:
     if not recs:
         return
     batch_rows, save_rows, persp_rows, query_rows = [], [], [], []
+    sweeps: list = []
     for ds in _datasets(recs):
         rs = [r for r in recs if r["dataset"] == ds]
         setup = next(r for r in rs if r["event"] == "setup")
@@ -530,6 +547,8 @@ def exp4(figs: Path, tabs: Path) -> None:
 
         # Maintenance cost vs maintained pairs (sweep + adaptive + all pairs).
         pts = defaultdict(list)
+        sweeps.append((ds, pts, statistics.mean(eager[b] for b in measured),
+                       statistics.mean(adaptive[b] for b in measured), setup["P"], n_persist))
         for r in rs:
             if r["event"] == "batch" and r["batch"] in measured and (
                     r["config"].startswith("pinned_") or r["config"] == "allpairs"):
@@ -551,6 +570,8 @@ def exp4(figs: Path, tabs: Path) -> None:
             fig.savefig(figs / f"fig_exp4_pair_sweep_{ds}.pdf")
             plt.close(fig)
 
+    fig_pair_sweep_all(sweeps, figs)
+    fig_pair_sweep_single(sweeps, figs)
     write_table("tab_exp4_batches", ["dataset", "batch", "events", "eager (s)", "adaptive (s)",
                                      "all pairs (s)", "R total", "R per persp."], batch_rows, tabs,
                 "Exp 4/5: absolute per-batch ingest time (server-side); "
@@ -568,51 +589,178 @@ def exp4(figs: Path, tabs: Path) -> None:
     write_table("tab_exp4_queries", ["dataset", "config", "queries", "median (s)", "mean (s)"],
                 query_rows, tabs, "Exp 4: latency of the per-batch query slices")
 
-    # Exp 5 figure: BPIC 2017.
-    rs = [r for r in recs if r["dataset"] == "bpic2017"]
-    if rs:
-        setup = next(r for r in rs if r["event"] == "setup")
-        persps = setup["perspectives"]
-        measured = list(range(1, 6))
-        eager = {(r["batch"], r["perspective"]): r["time"] for r in rs
-                 if r["event"] == "ingest" and r["config"] == "eager"}
-        e_tot, adaptive = _batch_times(rs, "eager"), _batch_times(rs, "adaptive")
-        if adaptive and e_tot:
-            fig, ax = plt.subplots(figsize=(3.6, 2.3))
-            width = 0.8 / len(persps)
-            for j, p in enumerate(persps):
-                xs = [b + (j - (len(persps) - 1) / 2) * width for b in measured]
-                ax.bar(xs, [eager.get((b, p), 0) for b in measured], width=width * 0.9,
-                       color=SERIES[j], label=f"eager: {p}")
-            ax.plot(measured, [adaptive[b] for b in measured], color=SERIES[6], linestyle="--",
-                    marker="o", linewidth=1.8, label="Adaptive indexing")
-            top = max(eager.values())
-            P = len(persps)
-            for b in measured:
-                r_tot = e_tot[b] / adaptive[b]
-                ax.text(b, top * 1.13, _times(r_tot), ha="center", color=TEXT, fontsize=6.5)
-                ax.text(b, top * 1.04, _times(r_tot / P), ha="center", color=TEXT2, fontsize=6.5)
-            ax.set_xticks(measured)
-            ax.set_xticklabels([f"B{b}" for b in measured])
-            ax.set_ylabel("Incremental ingest time (s)")
-            ax.set_ylim(0, top * 1.25)
-            ax.legend(ncol=3, fontsize=6, loc="lower center", bbox_to_anchor=(0.5, 1.02),
-                      columnspacing=1.0, handlelength=1.6)
-            ax.text(0.5, -0.2, f"above bars — upper: eager total ({P} perspectives) / adaptive;  "
-                               "lower: eager per perspective / adaptive",
-                    transform=ax.transAxes, ha="center", color=TEXT2, fontsize=5.8)
-            fig.savefig(figs / "fig_exp5_bpic2017.pdf")
-            plt.close(fig)
+    fig_exp5(recs, figs)
 
+
+
+# Times-like serif (Nimbus Roman, a metric-compatible Times clone; no LaTeX on this host),
+# no grid: the paper style of the Exp 5 figure.
+EXP5_STYLE = {
+    "font.family": "serif", "font.serif": ["Nimbus Roman", "Liberation Serif", "DejaVu Serif"],
+    "mathtext.fontset": "stix", "axes.grid": False,
+    "font.size": 9.5, "axes.labelsize": 9.5, "xtick.labelsize": 9, "ytick.labelsize": 9,
+}
+
+
+def fig_pair_sweep_all(sweeps: list, figs: Path) -> None:
+    """
+    All pair-sweep panels in one figure (paper style, EXP5_STYLE): per dataset, the mean
+    per-batch ingest of SIESTA-MP with n pinned pairs (sweep) against SIESTA-MP with its
+    workload-driven pairs and SIESTA-ALL (every pair of all perspectives).  The same
+    values as fig_exp4_pair_sweep_<ds>.  Sized 8.8 in wide for \\textwidth (~7 in), the
+    same 0.8 scale the single-column figures (4.2 in) get at \\columnwidth.
+    """
+    sweeps = [x for x in sweeps if x[1]]
+    if not sweeps:
+        return
+    with plt.rc_context(EXP5_STYLE):
+        fig, axes = plt.subplots(1, len(sweeps), figsize=(8.8, 2.3))
+        axes = np.atleast_1d(axes)
+        for ax, (ds, pts, e_mean, a_mean, P, _) in zip(axes, sweeps):
+            ns = sorted(pts)
+            ax.plot(ns, [statistics.mean(pts[n]) for n in ns], color=SERIES[0], marker="o",
+                    markersize=3.5, label="SIESTA-MP, n pinned pairs")
+            ax.axhline(e_mean, color=SERIES[1], linestyle="--", linewidth=1.4, label="SIESTA-ALL")
+            ax.axhline(a_mean, color=SERIES[6], linestyle=":", linewidth=1.6, label="SIESTA-MP, workload-driven")
+            ax.set_xscale("log")
+            ax.xaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())   # decades only
+            ax.set_ylim(bottom=0)
+            ax.set_title(f"{LABEL.get(ds, ds)} (P = {P})", fontsize=9.5)
+            ax.set_xlabel("Maintained pairs")
+        axes[0].set_ylabel("Mean per-batch\ningest time (s)")
+        h, l = axes[0].get_legend_handles_labels()
+        fig.tight_layout(rect=(0, 0, 1, 0.86))
+        fig.legend(h, l, loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=3, fontsize=8,
+                   columnspacing=1.2, handlelength=2.2, handletextpad=0.4, borderaxespad=0.1, borderpad=0.1)
+        fig.savefig(figs / "fig_exp4_pair_sweep_panels.pdf")
+        plt.close(fig)
+
+
+def fig_pair_sweep_single(sweeps: list, figs: Path) -> None:
+    """
+    All datasets in one panel (paper style): mean per-batch ingest relative to SIESTA-ALL
+    (the same means as the panels, each divided by its dataset's SIESTA-ALL mean), against
+    the number of maintained pairs.  Line: SIESTA-MP with n pinned pairs; star: SIESTA-MP
+    with its workload-driven pairs (at the number it kept PERSISTENT); dashed: SIESTA-ALL.
+    """
+    sweeps = [x for x in sweeps if x[1] and x[0] != "synthetic"]     # real logs only
+    if not sweeps:
+        return
+    with plt.rc_context(EXP5_STYLE):
+        fig, ax = plt.subplots(figsize=(4.2, 2.6))
+        ax.axhline(1.0, color=TEXT, linestyle="--", linewidth=1.2)
+        for ds, pts, e_mean, a_mean, P, n_persist in sweeps:
+            c, m = DS_COLOR[ds], DS_MARKER[ds]
+            ns = sorted(pts)
+            ax.plot(ns, [statistics.mean(pts[n]) / e_mean for n in ns], color=c, marker=m,
+                    markerfacecolor=SURFACE, markeredgewidth=1.2, markersize=5, linewidth=1.6)
+            if n_persist:
+                ax.plot([n_persist], [a_mean / e_mean], linestyle="none", marker="*", markersize=11,
+                        color=c, markeredgecolor=SURFACE, markeredgewidth=0.6, zorder=4)
+        ax.set_xscale("log")
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel("Maintained pairs (all perspectives)")
+        ax.set_ylabel("Mean per-batch ingest time\nrelative to SIESTA-ALL")
+        handles = [matplotlib.lines.Line2D([], [], color=DS_COLOR[ds], marker=DS_MARKER[ds],
+                                           markerfacecolor=SURFACE, label=f"{LABEL.get(ds, ds)} (P = {P})")
+                   for ds, _, _, _, P, _ in sweeps]
+        handles += [
+            matplotlib.lines.Line2D([], [], color=TEXT2, marker="o", markerfacecolor=SURFACE,
+                                    label="SIESTA-MP, n pinned pairs"),
+            matplotlib.lines.Line2D([], [], color=TEXT2, marker="*", markersize=10, linestyle="none",
+                                    label="SIESTA-MP, workload-driven"),
+            matplotlib.lines.Line2D([], [], color=TEXT, linestyle="--", label="SIESTA-ALL (= 1)"),
+        ]
+        fig.tight_layout(rect=(0, 0, 1, 0.80), pad=0.3)
+        fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=8,
+                   labelspacing=0.2, columnspacing=0.8, handlelength=2.0, handletextpad=0.4,
+                   borderaxespad=0.1, borderpad=0.1)
+        fig.savefig(figs / "fig_exp4_pair_sweep_all.pdf")
+        plt.close(fig)
+
+
+def fig_exp5(recs: list[dict], figs: Path) -> None:
+    """Exp 5 (BPIC 2017): eager per-perspective ingest (bars) vs adaptive (line), R per batch."""
+    rs = [r for r in recs if r["dataset"] == "bpic2017"]
+    if not rs:
+        return
+    setup = next(r for r in rs if r["event"] == "setup")
+    persps = setup["perspectives"]
+    measured = list(range(1, 6))
+    eager = {(r["batch"], r["perspective"]): r["time"] for r in rs
+             if r["event"] == "ingest" and r["config"] == "eager"}
+    e_tot, adaptive = _batch_times(rs, "eager"), _batch_times(rs, "adaptive")
+    if not (adaptive and e_tot):
+        return
+    with plt.rc_context(EXP5_STYLE):
+        fig, ax = plt.subplots(figsize=(4.6, 2.3))
+        width = 0.8 / len(persps)
+        for j, p in enumerate(persps):
+            xs = [b + (j - (len(persps) - 1) / 2) * width for b in measured]
+            ax.bar(xs, [eager.get((b, p), 0) for b in measured], width=width * 0.9,
+                   color=SERIES[j], label=f"SIESTA: {p}")
+        ax.plot(measured, [adaptive[b] for b in measured], color=SERIES[6], linestyle="--",
+                marker="o", linewidth=1.8, label="SIESTA-MP")
+        top = max(eager.values())
+        P = len(persps)
+        for b in measured:
+            r_tot = e_tot[b] / adaptive[b]
+            ax.text(b, top * 1.13, _times(r_tot), ha="center", color=TEXT, fontsize=8.5)
+            ax.text(b, top * 1.03, _times(r_tot / P), ha="center", color=TEXT2, fontsize=8.5)
+        ax.set_xlim(0.5, len(measured) + 0.5)     # no extra padding around the batches
+        ax.set_xticks(measured)
+        ax.set_xticklabels([f"B{b}" for b in measured])
+        ax.set_ylabel("Incremental ingest time (s)")
+        ax.set_ylim(0, top * 1.25)
+        # matplotlib fills legend columns top to bottom: reorder so each row reads left to right
+        h0, l0 = ax.get_legend_handles_labels()
+        ncol = 3
+        rows = -(-len(h0) // ncol)
+        slots = [None] * (rows * ncol)
+        for k in range(len(h0)):
+            r, c = divmod(k, ncol)
+            slots[r + c * rows] = k
+        h = [h0[k] for k in slots if k is not None]
+        l = [l0[k] for k in slots if k is not None]
+        ax.legend(h, l, ncol=ncol, fontsize=8, loc="lower center", bbox_to_anchor=(0.5, 1.0),
+                  labelspacing=0.2, columnspacing=0.8, handlelength=1.2, handletextpad=0.3,
+                  borderaxespad=0.1, borderpad=0.1)
+        fig.savefig(figs / "fig_exp5_bpic2017.pdf")
+        plt.close(fig)
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", type=Path, default=eval_common.RESULTS_DIR)
+    ap.add_argument("--only", choices=["exp5", "fig3", "fig4", "pairsweep"], help="regenerate just this figure")
     args = ap.parse_args()
     eval_common.RESULTS_DIR = args.results
     figs, tabs = args.results / "figures", args.results / "tables"
     figs.mkdir(parents=True, exist_ok=True)
     tabs.mkdir(parents=True, exist_ok=True)
+    if args.only == "pairsweep":
+        import tempfile
+        scratch = Path(tempfile.mkdtemp())       # exp4 also writes tables: keep them untouched
+        exp4(scratch, scratch)                   # its per-dataset figures go to scratch too
+        import shutil
+        for f in ("fig_exp4_pair_sweep_all.pdf", "fig_exp4_pair_sweep_panels.pdf"):
+            shutil.copy(scratch / f, figs / f)
+        print(f"figure -> {figs / 'fig_exp4_pair_sweep_all.pdf'}")
+        return
+    if args.only == "fig4":
+        import tempfile
+        exp3(figs, Path(tempfile.mkdtemp()))     # tables to a scratch dir: results untouched
+        print(f"figures -> {figs}/fig4_hotset_*.pdf")
+        return
+    if args.only == "fig3":
+        import tempfile
+        scratch = Path(tempfile.mkdtemp())       # exp1/exp2 also write tables: keep them untouched
+        fig3(figs, exp1(scratch), exp2(scratch))
+        print(f"figure -> {figs / 'fig3_adaptation.pdf'}")
+        return
+    if args.only == "exp5":
+        fig_exp5(eval_common.read_results("exp4_maintenance"), figs)
+        print(f"figure -> {figs / 'fig_exp5_bpic2017.pdf'}")
+        return
     d2 = exp2(tabs)
     fig3(figs, exp1(tabs), d2)
     fig_breakeven(figs, d2)

@@ -45,10 +45,7 @@ change as new activity types appear.
     l1_query_count         DOUBLE             -- decayed counter
     l1_total_savings_ms    DOUBLE
     l1_maintenance_ms_per_batch   DOUBLE
-    l2_build_cost_ms       DOUBLE
-    l2_pos_query_count     DOUBLE             -- decayed counter
-    l2_total_savings_ms    DOUBLE
-    l2_maintenance_ms_per_batch   DOUBLE
+    l1_maintenance_batch_count    DOUBLE  -- decayed batches maintained at L1+ since last promotion
     last_decay_ts          DOUBLE             -- when counters were last decayed
     pairs_json             STRING             -- JSON: {"{A}__{B}": {...}}
 
@@ -68,7 +65,6 @@ from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     ArrayType,
     DoubleType,
-    LongType,
     IntegerType,
     StringType,
     StructField,
@@ -102,10 +98,7 @@ CATALOG_SCHEMA = StructType([
     StructField("l1_query_count",              DoubleType(),        True),
     StructField("l1_total_savings_ms",         DoubleType(),        True),
     StructField("l1_maintenance_ms_per_batch", DoubleType(),        True),
-    StructField("l2_build_cost_ms",            DoubleType(),        True),
-    StructField("l2_pos_query_count",          DoubleType(),        True),
-    StructField("l2_total_savings_ms",         DoubleType(),        True),
-    StructField("l2_maintenance_ms_per_batch", DoubleType(),        True),
+    StructField("l1_maintenance_batch_count",  DoubleType(),        True),
     StructField("last_decay_ts",               DoubleType(),        True),
     StructField("pairs_json",                  StringType(),        True),
 ])
@@ -332,8 +325,6 @@ class PerspectiveCatalog:
         self,
         pid: str,
         pairs_touched: list[tuple[str, str]],
-        references_pos: bool,
-        total_query_ms: float,
         pair_savings_ms: dict[tuple[str, str], float],
         decay=None,
     ) -> None:
@@ -348,8 +339,6 @@ class PerspectiveCatalog:
         ----------
         pid              : perspective ID
         pairs_touched    : all (A, B) pairs fetched during this query
-        references_pos   : True if the query referenced a[pos]
-        total_query_ms   : wall-clock time of the full query
         pair_savings_ms  : per-pair savings vs. lazy scan (may be 0.0
                            for pairs that were scanned lazily this time)
         decay            : optional RetentionPolicy.  When given, the
@@ -369,18 +358,9 @@ class PerspectiveCatalog:
 
             if decay is not None:
                 decay.decay_perspective(stats)
+            # L1 materialises nothing (phi_G is evaluated on read), so it
+            # saves nothing: its retention is recency alone.
             stats.l1_query_count += 1
-            # Coarse savings estimate for L1: the avoided cost of
-            # recomputing phi_G and re-partitioning.  We approximate
-            # this as a fixed fraction of the total query time for
-            # queries that hit the established perspective.
-            # A more accurate estimate is set by the QueryPlanner once
-            # it can measure lazy-path cost on first touch.
-            stats.l1_total_savings_ms += total_query_ms * 0.1
-
-            if references_pos:
-                stats.l2_pos_query_count += 1
-                stats.l2_total_savings_ms += total_query_ms * 0.05
 
             for (a, b) in pairs_touched:
                 ps = stats.pairs.setdefault((a, b), PairStats())
@@ -396,8 +376,8 @@ class PerspectiveCatalog:
         self,
         pid: str,
         l1_ms: float,
-        l2_ms: float,
         pair_ms: dict[tuple[str, str], float],
+        decay=None,
     ) -> None:
         """
         Record the wall-clock cost of one ingest-batch maintenance cycle
@@ -410,8 +390,10 @@ class PerspectiveCatalog:
         ----------
         pid      : perspective ID
         l1_ms    : cost of L1 grouping-column projection for this batch
-        l2_ms    : cost of L2 positional-annotation update for this batch
         pair_ms  : per-pair maintenance cost {(A, B): ms}
+        decay    : optional RetentionPolicy.  When given, the batch
+                   counters are decayed up to now before this batch is
+                   added (see record_query_touch).
         """
         with self._lock:
             stats = self._cache.get(pid)
@@ -421,6 +403,9 @@ class PerspectiveCatalog:
                     f"unknown perspective '{pid}', ignoring."
                 )
                 return
+
+            if decay is not None:
+                decay.decay_perspective(stats)
 
             # Running mean: update with exponential moving average so
             # that recent batch costs are weighted more heavily than
@@ -435,16 +420,16 @@ class PerspectiveCatalog:
                     + alpha * l1_ms
                 )
 
-            if stats.l2_maintenance_ms_per_batch == 0.0:
-                stats.l2_maintenance_ms_per_batch = l2_ms
-            else:
-                stats.l2_maintenance_ms_per_batch = (
-                    (1 - alpha) * stats.l2_maintenance_ms_per_batch
-                    + alpha * l2_ms
-                )
+            # Batch counter B for the L1 retention predicate: this method
+            # is called only for established (L1) perspectives, once per
+            # ingest batch.  Decayed like the query counters, so both
+            # sides of a predicate cover the same recent window.
+            stats.l1_maintenance_batch_count += 1
 
             for (a, b), ms in pair_ms.items():
                 ps = stats.pairs.setdefault((a, b), PairStats())
+                if decay is not None:
+                    decay.decay_pair(ps)
                 ps.total_maintenance_ms += ms
                 ps.maintenance_batch_count += 1
 
@@ -663,11 +648,15 @@ class PerspectiveCatalog:
                     )
                     .whenMatchedUpdateAll()
                     .whenNotMatchedInsertAll()
+                    # A catalog written before a column existed gains it
+                    # here; without this, updateAll drops source columns
+                    # the target lacks, silently losing their values.
+                    .withSchemaEvolution()
                     .execute()
                 )
             except Exception as exc:
                 # The table disappeared (e.g. clear_existing) or has an
-                # older schema.  Rewrite it from the in-memory state, which
+                # incompatible schema.  Rewrite it from the in-memory state, which
                 # is the source of truth, so no other perspective is lost.
                 logger.warning(
                     f"PerspectiveCatalog: MERGE failed for '{pid}' "
@@ -760,10 +749,7 @@ def _stats_to_row(pid: str, stats: PerspectiveStats) -> dict:
         "l1_query_count":              stats.l1_query_count,
         "l1_total_savings_ms":         stats.l1_total_savings_ms,
         "l1_maintenance_ms_per_batch": stats.l1_maintenance_ms_per_batch,
-        "l2_build_cost_ms":            stats.l2_build_cost_ms,
-        "l2_pos_query_count":          stats.l2_pos_query_count,
-        "l2_total_savings_ms":         stats.l2_total_savings_ms,
-        "l2_maintenance_ms_per_batch": stats.l2_maintenance_ms_per_batch,
+        "l1_maintenance_batch_count":  float(stats.l1_maintenance_batch_count),
         "last_decay_ts":               stats.last_decay_ts,
         "pairs_json":                  json.dumps(pairs_serialised),
     }
@@ -792,13 +778,14 @@ def _row_to_stats(row) -> PerspectiveStats:
             status=              PairStatus(v.get("status",   PairStatus.ABSENT.value)),
             last_accessed_ts=    v.get("last_accessed_ts",    0.0),
             last_decay_ts=       v.get("last_decay_ts",       0.0),
-            maintenance_batch_count=v.get("maintenance_batch_count", 0),
+            maintenance_batch_count=float(v.get("maintenance_batch_count", 0.0)),
             pinned=              bool(v.get("pinned", False)),
         )
         pairs[(a, b)] = ps
 
     return PerspectiveStats(
-        level=         PerspectiveLevel(row["level"]),
+        # Level 2 (the removed L2 positions overlay) loads as L1.
+        level=         PerspectiveLevel(1 if row["level"] == 2 else row["level"]),
         grouping_keys= list(row["grouping_keys"]),
         lookback=      row["lookback"],
         lookback_mode= row["lookback_mode"],
@@ -806,10 +793,8 @@ def _row_to_stats(row) -> PerspectiveStats:
         l1_query_count=              float(row["l1_query_count"]        or 0.0),
         l1_total_savings_ms=         row["l1_total_savings_ms"]         or 0.0,
         l1_maintenance_ms_per_batch= row["l1_maintenance_ms_per_batch"] or 0.0,
-        l2_build_cost_ms=            row["l2_build_cost_ms"]            or 0.0,
-        l2_pos_query_count=          float(row["l2_pos_query_count"]    or 0.0),
-        l2_total_savings_ms=         row["l2_total_savings_ms"]         or 0.0,
-        l2_maintenance_ms_per_batch= row["l2_maintenance_ms_per_batch"] or 0.0,
         last_decay_ts=               (row.asDict().get("last_decay_ts") or 0.0),
+        # Absent in catalogs written before these columns existed.
+        l1_maintenance_batch_count=  float(row.asDict().get("l1_maintenance_batch_count") or 0.0),
         pairs=pairs,
     )

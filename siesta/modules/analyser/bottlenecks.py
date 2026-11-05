@@ -5,6 +5,7 @@ import logging
 
 from siesta.modules.analyser.durations import _resolve_group_cols, _apply_group_value_filter
 from siesta.modules.analyser.duration_format import add_human_duration_columns
+from siesta.modules.analyser.business_time import apply_business_calendar, duration_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +18,15 @@ def _compute_pair_stats(events_df: DataFrame, group_cols: list[str], total_group
     directly_follows.py itself is left untouched.
     """
     w = Window.partitionBy(*group_cols).orderBy("position")
+    has_off_hours = "off_hours" in events_df.columns
     pairs = (
         events_df
         .withColumn("target", F.lead("activity").over(w))
         .withColumn("next_start_timestamp", F.lead("start_timestamp").over(w))
-        .filter(F.col("target").isNotNull())
-        .withColumnRenamed("activity", "source")
     )
+    if has_off_hours:
+        pairs = pairs.withColumn("_next_off_hours", F.lead("off_hours").over(w))
+    pairs = pairs.filter(F.col("target").isNotNull()).withColumnRenamed("activity", "source")
 
     if end_time is not None:
         pairs = pairs.withColumn(
@@ -36,14 +39,20 @@ def _compute_pair_stats(events_df: DataFrame, group_cols: list[str], total_group
             F.col("next_start_timestamp").cast("double") - F.col("start_timestamp").cast("double")
         )
 
-    return pairs.groupBy("source", "target").agg(
+    aggs = [
         F.avg("duration_sec").alias("avg_duration_sec"),
         F.percentile_approx("duration_sec", 0.5).alias("median_duration_sec"),
         F.min("duration_sec").alias("min_duration_sec"),
         F.max("duration_sec").alias("max_duration_sec"),
         F.count(F.lit(1)).alias("occurrence_count"),
         (F.countDistinct(*group_cols) / F.lit(total_groups)).alias("support"),
-    )
+    ]
+    if has_off_hours:
+        # Share of this pair's occurrences where either endpoint event falls
+        # outside working hours (set by a business calendar).
+        aggs.append(F.avg(F.when(F.col("off_hours") | F.col("_next_off_hours"), 1.0)
+                          .otherwise(0.0)).alias("off_hours_share"))
+    return pairs.groupBy("source", "target").agg(*aggs)
 
 
 def compute_bottlenecks(
@@ -57,6 +66,7 @@ def compute_bottlenecks(
     support_threshold: float = 0.0,
     sigma_multiplier: float = 3.0,
     order_by: str = "impact_score",
+    business_calendar: Optional[dict] = None,
 ) -> DataFrame:
     """Surfaces activity-pair "regions" that are both common among traces and
     take unusually long relative to other common regions.
@@ -104,6 +114,14 @@ def compute_bottlenecks(
                   avg_duration_sec * occurrence_count - a frequency-weighted
                   measure so a frequent-and-slow pair ranks above a rare-but-
                   slower one), "avg_duration_sec", or "median_duration_sec".
+        business_calendar: Optional working-time calendar (see business_time).
+                  When given, durations are measured on the working clock
+                  (weekends, holidays and hours outside the working window do
+                  not count), *_human columns use working days/weeks, and an
+                  off_hours_share column gives the fraction of each pair's
+                  occurrences with an endpoint event outside working hours. Not
+                  combinable with end_time (attribute end timestamps are not
+                  mapped onto the working clock).
 
     Returns:
         Spark DataFrame with columns: source, target, avg_duration_sec,
@@ -121,6 +139,13 @@ def compute_bottlenecks(
 
     if grouping_value is not None:
         events_df = _apply_group_value_filter(events_df, group_cols[0], grouping_value)
+
+    formatter = None
+    if business_calendar:
+        if end_time is not None:
+            raise ValueError("business_calendar cannot be combined with end_time")
+        events_df = apply_business_calendar(events_df, business_calendar)
+        formatter = duration_formatter(business_calendar)
 
     if grouping_key is None and grouping_value is None:
         total_groups = trace_count
@@ -177,7 +202,7 @@ def compute_bottlenecks(
 
     # Attach human-readable companions (avg_duration_human, ...,
     # bottleneck_cutoff_human) beside every *_sec column before ordering.
-    result_df = add_human_duration_columns(result_df)
+    result_df = add_human_duration_columns(result_df, formatter=formatter)
 
     order_col = order_by if order_by in ("impact_score", "avg_duration_sec", "median_duration_sec") else "impact_score"
     result_df = result_df.orderBy(F.col(order_col).desc())

@@ -47,7 +47,7 @@ from pathlib import Path
 from tests.vldb_eval.batch_splitter import _iter_log
 from tests.vldb_eval.eval_common import REPO_ROOT, discover_schema
 
-RAW_DIR = Path("/mnt/datasets")
+RAW_DIR = REPO_ROOT / "datasets"       # <name>.xes of the BPIC logs
 DATA_DIR = Path(__file__).resolve().parent / "results" / "data"
 
 BPIC = ["bpic2011", "bpic2012", "bpic2015", "bpic2017", "bpic2018"]

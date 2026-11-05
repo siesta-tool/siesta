@@ -365,7 +365,7 @@ def sanitize_attrs(attrs: list[str]) -> dict[str, str]:
 def query_attrs(qs: list[dict]) -> list[str]:
     seen = []
     for q in qs:
-        for e in q["events"]:
+        for e in q.get("events") or q.get("elements") or []:
             for p in e["preds"]:
                 if p["attr"] not in seen:
                     seen.append(p["attr"])
@@ -565,13 +565,52 @@ def mr_sql(q: dict, table: str, cmap: dict[str, str], skip: str = "past",
             f"  DEFINE\n" + ",\n".join(defines) + "\n) AS T")
 
 
+def mr_sql_elements(q: dict, table: str, cmap: dict[str, str]) -> str:
+    """
+    MATCH_RECOGNIZE for the element model (pattern_long / pattern_bgl): ``X?``
+    and ``X+`` are the pattern quantifiers ``?`` / ``+?`` (reluctant: see below), ``(X || W)`` is ``activity IN``,
+    literal predicates go into DEFINE, and ``A !Y B`` is a gap variable that
+    excludes Y between A and B.  Full results: one row per match with the
+    position of every element (FIRST of its rows; null for a skipped ``X?``).
+    """
+    els = q["elements"]
+    n = len(els)
+    parts, defines = [], []
+    for i, e in enumerate(els, 1):
+        # Flink 1.20 accepts greedy ``?`` after the reluctant gaps, but rejects a greedy ``+``
+        # before an optional gap or at the end, and any reluctant ``??``: ``+`` is written
+        # reluctant (``+?``); under existence semantics both forms match the same groups
+        parts.append(f"E{i}" + {"one": "", "opt": "?", "plus": "+?"}[e["quant"]])
+        conds = [f"E{i}.activity IN (" + ", ".join(sql_str(a) for a in e["acts"]) + ")"]
+        for p in e["preds"]:
+            col = cmap.get(p["attr"])
+            conds.append("FALSE" if col is None else f"E{i}.`{col}` = {sql_str(p['value'])}")
+        defines.append(f"    E{i} AS " + " AND ".join(conds))
+        if i < n:
+            parts.append(f"G{i}*?")
+            if e["neg_after"]:      # no forbidden activity strictly between E{i} and E{i+1}
+                defines.append(f"    G{i} AS G{i}.activity NOT IN (" +
+                               ", ".join(sql_str(y) for y in e["neg_after"]) + ")")
+    measures = ", ".join(f"FIRST(E{i}.gpos) AS p{i}" for i in range(1, n + 1))
+    return (f"SELECT grp, {', '.join(f'p{i}' for i in range(1, n + 1))} FROM {table}\n"
+            f"MATCH_RECOGNIZE (\n"
+            f"  PARTITION BY grp ORDER BY rt\n"
+            f"  MEASURES {measures}\n"
+            f"  ONE ROW PER MATCH\n"
+            f"  AFTER MATCH SKIP PAST LAST ROW\n"
+            f"  PATTERN ({' '.join(parts)})\n"
+            f"  DEFINE\n" + ",\n".join(defines) + "\n) AS T")
+
+
 # ---------------------------------------------------------------------------
 # Timed execution
 # ---------------------------------------------------------------------------
 
 def timed_count(gw: Gateway, jm: JobManager, s: str, sql: str, name: str,
-                timeout_s: float = TIMEOUT_S) -> dict:
-    """Run a COUNT query; wall time from the POST until the changelog's EOS (final count)."""
+                timeout_s: float = TIMEOUT_S, rows: bool = False) -> dict:
+    """Run a COUNT query; wall time from the POST until the changelog's EOS (final count).
+    ``rows``: the query returns full results (one row per match, group key first):
+    every row is fetched and the matched groups are its distinct keys."""
     jm.wait_idle()
     gw.run(s, f"SET 'pipeline.name' = {sql_str(name)}")
     wall0 = time.time()
@@ -582,6 +621,7 @@ def timed_count(gw: Gateway, jm: JobManager, s: str, sql: str, name: str,
         op = gw.submit(s, sql)
         t_sub = time.perf_counter()
         token, sleep, value, jid, n_rows = 0, 0.005, None, None, 0
+        groups: set = set()
         while True:
             left = timeout_s - (time.perf_counter() - t0)
             if left <= 0:
@@ -590,7 +630,10 @@ def timed_count(gw: Gateway, jm: JobManager, s: str, sql: str, name: str,
             jid = jid or d.get("jobID")
             for row in (d.get("results") or {}).get("data", []):
                 n_rows += 1
-                if row.get("kind", "INSERT") in ("INSERT", "UPDATE_AFTER"):
+                if rows:
+                    if row.get("kind", "INSERT") in ("INSERT", "UPDATE_AFTER"):
+                        groups.add(row["fields"][0])
+                elif row.get("kind", "INSERT") in ("INSERT", "UPDATE_AFTER"):
                     value = row["fields"][0]
                 else:                       # UPDATE_BEFORE / DELETE
                     value = None
@@ -606,7 +649,7 @@ def timed_count(gw: Gateway, jm: JobManager, s: str, sql: str, name: str,
             token = nxt
         t_end = time.perf_counter()
         res["time_s"] = round(t_end - t0, 4)
-        res["matched_groups"] = int(value) if value is not None else 0
+        res["matched_groups"] = len(groups) if rows else (int(value) if value is not None else 0)
         res["phases"] = {"submit_post_s": round(t_sub - t0, 4), "changelog_rows": n_rows}
         res["_jid"], res["_wall"] = jid, (wall0, wall0 + (t_end - t0))
     except TimeoutError:
@@ -714,7 +757,16 @@ def select_queries(qs: list[dict], args) -> list[dict]:
 
 
 def run_perspective(gw: Gateway, jm: JobManager, ds: str, persp: str, args, flink: dict) -> None:
-    all_qs = load_queries(ds, persp)
+    if args.suite == "bgl":       # element model, full results; no bindings ($1)
+        from tests.vldb_eval.pattern_bgl import load as load_bgl
+        all_qs = [q for q in load_bgl(ds, persp) if q["kind"] != "binding"]
+    else:
+        all_qs = load_queries(ds, persp)
+    elements = args.suite == "bgl"
+
+    def sql_of(q):
+        return (mr_sql_elements(q, tb, cmap) if elements
+                else mr_sql(q, tb, cmap, args.skip, args.gaps, raw=is_raw(persp)))
     qs = select_queries(all_qs, args)
     attrs = query_attrs(all_qs)
     cmap = sanitize_attrs([a for a in attrs])
@@ -749,14 +801,19 @@ def run_perspective(gw: Gateway, jm: JobManager, ds: str, persp: str, args, flin
                 "type": "setup", "system": "mr", "dataset": ds, "perspective": persp,
                 "data": prep, "table": reg, "flink": flink, "session": SESSION_SET,
                 "variant": variant(args), "skip": args.skip, "gaps": args.gaps, "timeout_s": args.timeout, "reps": args.reps,
-                "sql_example": mr_sql(qs[0], tb, cmap, args.skip, args.gaps, raw=is_raw(persp)) if qs else None,
+                "sql_example": sql_of(qs[0]) if qs else None, "full_results": elements,
                 "meta": run_meta()}) + "\n")
             f.flush()
             if qs:   # warm-up, discarded: the first query cut to its first 2 events
-                wq = {**qs[0], "events": [{**e, "preds": [p for p in e["preds"] if "ref" not in p or p["ref"] <= 1]}
-                                          for e in qs[0]["events"][:2]]}
-                w = timed_count(gw, jm, s, mr_sql(wq, tb, cmap, args.skip, args.gaps, raw=is_raw(persp)), f"warmup.{ds}.{persp}",
-                                timeout_s=min(args.timeout, 120.0))
+                if elements:
+                    e2 = [dict(e) for e in qs[0]["elements"][:2]]
+                    e2[-1]["neg_after"] = []
+                    wq = {**qs[0], "elements": e2}
+                else:
+                    wq = {**qs[0], "events": [{**e, "preds": [p for p in e["preds"] if "ref" not in p or p["ref"] <= 1]}
+                                              for e in qs[0]["events"][:2]]}
+                w = timed_count(gw, jm, s, sql_of(wq), f"warmup.{ds}.{persp}",
+                                timeout_s=min(args.timeout, 120.0), rows=elements)
                 print(f"[{ds}/{persp}] warm-up: {w['time_s']}s n={w['matched_groups']} "
                       f"{w['error'] or ''}", flush=True)
             n_ok = n_run = n_to = 0
@@ -768,9 +825,9 @@ def run_perspective(gw: Gateway, jm: JobManager, ds: str, persp: str, args, flin
                     f.flush()
                     print(f"  {q['qid']} skipped ({args.skip_after} consecutive timeouts)", flush=True)
                     continue
-                sql = mr_sql(q, tb, cmap, args.skip, args.gaps, raw=is_raw(persp))
+                sql = sql_of(q)
                 for rep in range(args.reps):
-                    res = timed_count(gw, jm, s, sql, f"{q['qid']}.r{rep}", timeout_s=args.timeout)
+                    res = timed_count(gw, jm, s, sql, f"{q['qid']}.r{rep}", timeout_s=args.timeout, rows=elements)
                     truth = q["truth"]
                     parity = res["matched_groups"] == truth["matched_groups"]
                     rec = {"system": "mr", "variant": variant(args), "qid": q["qid"], "dataset": ds, "perspective": persp,
@@ -820,6 +877,8 @@ def main() -> None:
     ap.add_argument("--skip-after", type=int, default=SKIP_AFTER,
                     help="consecutive timeouts of a kind before the rest of that kind is skipped (0: off)")
     ap.add_argument("--out", default=None, help="output path (single dataset/perspective only)")
+    ap.add_argument("--suite", default="", choices=["", "bgl"],
+                    help="bgl: pattern_bgl's structural + attribute-aware queries, full results")
     args = ap.parse_args()
     gw, jm = Gateway(), JobManager()
     st = wait_flink(gw, jm)

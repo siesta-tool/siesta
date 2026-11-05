@@ -12,7 +12,7 @@ a companion ``*_human`` column next to each ``*_sec`` column.
 place, preserves the sign, and returns ``"n/a"`` for ``None``.
 """
 
-from typing import Optional
+from typing import Callable, Optional
 
 _SEC_SUFFIX = "_sec"
 
@@ -39,7 +39,8 @@ def format_duration(seconds: Optional[float]) -> str:
     return f"{sign}{seconds / 604800:.1f}w"
 
 
-def add_human_duration_columns(df, sec_columns: Optional[list] = None):
+def add_human_duration_columns(df, sec_columns: Optional[list] = None,
+                               formatter: Optional[Callable[[Optional[float]], str]] = None):
     """Return ``df`` with a ``<name>_human`` string column beside every
     ``<name>_sec`` column, formatted by :func:`format_duration`.
 
@@ -47,6 +48,8 @@ def add_human_duration_columns(df, sec_columns: Optional[list] = None):
         df: A Spark DataFrame carrying one or more second-valued columns.
         sec_columns: Explicit list of columns to humanize. When ``None``
             (the default), every column whose name ends in ``_sec`` is used.
+        formatter: Alternative seconds -> string function (e.g. a working-time
+            formatter); defaults to :func:`format_duration`.
 
     Each companion column is inserted immediately after its source column and
     named by replacing the trailing ``_sec`` with ``_human`` (e.g.
@@ -63,7 +66,7 @@ def add_human_duration_columns(df, sec_columns: Optional[list] = None):
     if not sec_columns:
         return df
 
-    to_human = F.udf(format_duration, StringType())
+    to_human = F.udf(formatter or format_duration, StringType())
     select_exprs = []
     for col in df.columns:
         select_exprs.append(F.col(col))

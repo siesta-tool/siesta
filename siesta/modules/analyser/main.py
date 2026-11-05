@@ -59,6 +59,7 @@ class LoopDetectionConfig(BaseModel):
     include_repeats: bool = Field(True, description="When false, skip the repeated-pattern search (self-loops and non-self-loops are always detected)")
     with_time_stats: bool = Field(True, description="Include per-pattern occurrence/cost statistics (avg/median events, time, and their share of the group's length/span)")
     with_distribution: bool = Field(False, description="Additionally emit the spread of per-trace time consumed by each pattern (min/p10/p25/p50/p75/p90/max/stddev), in absolute seconds and as a share of the trace; requires with_time_stats")
+    business_calendar: Dict[str, Any] | None = Field(None, description='Optional working-time calendar {"holidays": ["YYYY-MM-DD", ...], "work_start": "07:45", "work_end": "15:15", "weekend_days": [5, 6]}: durations are measured in working time only and an off_hours_share is reported per entry')
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
 
 
@@ -166,6 +167,7 @@ class BottlenecksConfig(BaseModel):
     support_threshold: float = Field(0.0, description="Minimum fraction of groups a pair must occur in to count as 'common'; pairs below this are dropped entirely. Default 0.0 keeps every pair")
     sigma_multiplier: float = Field(3.0, description="How many standard deviations above the mean avg_duration_sec (over the support_threshold-filtered population) a pair must exceed to be flagged is_bottleneck")
     order_by: str = Field("impact_score", description="Column to rank/truncate by: 'impact_score' (default), 'avg_duration_sec', or 'median_duration_sec'")
+    business_calendar: Dict[str, Any] | None = Field(None, description='Optional working-time calendar {"holidays": ["YYYY-MM-DD", ...], "work_start": "07:45", "work_end": "15:15", "weekend_days": [5, 6]}: durations are measured in working time only and an off_hours_share is reported per entry')
     output_path: str = Field("output/example_log", description="Local path prefix for the output file")
 
 
@@ -360,6 +362,7 @@ class Analyser(SiestaModule):
                 "include_repeats": True,
                 "with_time_stats": True,
                 "with_distribution": False,
+                "business_calendar": None,
             },
         },
     })]) -> Any:
@@ -396,6 +399,11 @@ class Analyser(SiestaModule):
             `pct_trace_time_distribution` per entry: the min/p10/p25/p50/p75/p90/max/stddev spread of the
             per-trace time each pattern consumes, in absolute seconds and as a share of the trace. Requires
             `with_time_stats`.
+        - `business_calendar` *(dict | null, default: `null`)* - measure every duration in working time:
+            `{"holidays": ["YYYY-MM-DD", ...], "work_start": "07:45", "work_end": "15:15", "weekend_days": [5, 6]}`
+            (weekday numbers Monday=0). Weekends, holidays and hours outside the window do not advance the clock;
+            events there are kept and flagged, and each entry gains `off_hours_share`. `*_human` values use
+            working days/weeks (`wd`/`ww`). Timestamps are read as wall-clock values in UTC fields.
         """
         logger.info(f"{self.name} running loop_detection via API.")
         self.siesta_config = get_system_config()
@@ -730,6 +738,7 @@ class Analyser(SiestaModule):
                 "support_threshold": 0.0,
                 "sigma_multiplier": 3.0,
                 "order_by": "impact_score",
+                "business_calendar": None,
             },
         },
     })]) -> Any:
@@ -757,6 +766,11 @@ class Analyser(SiestaModule):
         - `support_threshold` *(float [0,1], default: `0.0`)* - minimum support for a pair to count as "common".
         - `sigma_multiplier` *(float, default: `3.0`)* - standard deviations above the mean required for `is_bottleneck`.
         - `order_by` *(str, default: `"impact_score"`)* - `"impact_score"`, `"avg_duration_sec"`, or `"median_duration_sec"`.
+        - `business_calendar` *(dict | null, default: `null`)* - measure every duration in working time:
+            `{"holidays": ["YYYY-MM-DD", ...], "work_start": "07:45", "work_end": "15:15", "weekend_days": [5, 6]}`
+            (weekday numbers Monday=0). Weekends, holidays and hours outside the window do not advance the clock;
+            events there are kept and flagged, and each entry gains `off_hours_share` (share of a pair's occurrences with an off-hours endpoint). `*_human` values use
+            working days/weeks (`wd`/`ww`). Timestamps are read as wall-clock values in UTC fields.
         """
         logger.info(f"{self.name} running bottlenecks via API.")
         self.siesta_config = get_system_config()
@@ -989,6 +1003,7 @@ class Analyser(SiestaModule):
             include_repeats=self.analyser_config.get("include_repeats", True),
             with_time_stats=self.analyser_config.get("with_time_stats", True),
             with_distribution=self.analyser_config.get("with_distribution", False),
+            business_calendar=self.analyser_config.get("business_calendar"),
         )
 
         events_df.unpersist()
@@ -1402,6 +1417,7 @@ class Analyser(SiestaModule):
             support_threshold=self.analyser_config.get("support_threshold", 0.0),
             sigma_multiplier=self.analyser_config.get("sigma_multiplier", 3.0),
             order_by=self.analyser_config.get("order_by", "impact_score"),
+            business_calendar=self.analyser_config.get("business_calendar"),
         )
 
         output_path = self.analyser_config["output_path"] + ".csv"

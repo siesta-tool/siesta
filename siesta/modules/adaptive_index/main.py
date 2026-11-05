@@ -20,9 +20,6 @@ from siesta.modules.adaptive_index.builders import (
     build_pair_persistent,
     incremental_update_persistent_pairs,
     promote_to_l1,
-    promote_to_l2,
-    _perspective_positions_path,
-    _perspective_seq_metadata_path,
 )
 from siesta.modules.adaptive_index.catalog import get_catalog
 from siesta.modules.adaptive_index.retention import RetentionPolicy
@@ -709,8 +706,8 @@ class Adaptive_Indexing(SiestaModule):
     def _run_incremental_maintenance(self, batch_activity_df, batch_min_ts: int) -> Dict[str, Any]:
         """
         Maintain every established perspective for one batch.  Returns
-        per-perspective timings: {pid: {n_pairs, total_s, l2_ms,
-        prepare_ms, pairs_ms}}.
+        per-perspective timings: {pid: {n_pairs, total_s, extract_ms,
+        write_ms, last_checked_ms}}.
         """
         report: Dict[str, Any] = {}
         for pid, stats in self._catalog.all_established_perspectives():
@@ -732,9 +729,6 @@ class Adaptive_Indexing(SiestaModule):
                     persistent_pairs=persistent_pairs,
                     lookback=stats.lookback,
                     lookback_mode=stats.lookback_mode,
-                    has_pos=(
-                        stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
-                    ),
                     metadata=self.metadata,
                     storage=self.storage,
                     timings=stage_ms,
@@ -757,13 +751,12 @@ class Adaptive_Indexing(SiestaModule):
             get_lru_cache(self.metadata).invalidate_perspective(pid)
 
             total_ms = (time.time() - t0) * 1000
-            # L1 has no per-batch work (grouping is computed on the fly);
-            # L2 pays for extending the positions overlay.
+            # L1 has no per-batch work (grouping is computed on the fly).
             self._catalog.record_batch_maintenance(
                 pid=pid,
                 l1_ms=0.0,
-                l2_ms=stage_ms.get("l2_ms", 0.0),
                 pair_ms=pair_elapsed,
+                decay=self._retention,
             )
             report[pid] = {
                 "n_pairs": len(persistent_pairs),
@@ -792,8 +785,6 @@ class Adaptive_Indexing(SiestaModule):
                                even before the next query.  This is a
                                safety net; the query planner promotes
                                synchronously on first touch.
-        L1 -> L2             : triggered when pos-referencing query
-                               frequency * mean savings exceeds threshold.
         ABSENT -> PERSISTENT : triggered per pair when accumulated
                                savings cross the L3 threshold.
 
@@ -817,15 +808,13 @@ class Adaptive_Indexing(SiestaModule):
                     f"{self.name}: promoting '{pid}' L0->L1 "
                     "(retention backstop)."
                 )
-                t0 = time.time()
                 try:
-                    promote_to_l1(
+                    stats.l1_build_cost_ms = promote_to_l1(
                         pid=pid,
                         grouping_keys=stats.grouping_keys,
                         metadata=self.metadata,
                         storage=self.storage,
                     )
-                    stats.l1_build_cost_ms = (time.time() - t0) * 1000
                     self._catalog.promote(
                         pid, PerspectiveLevel.L1_POS_FREE
                     )
@@ -836,36 +825,9 @@ class Adaptive_Indexing(SiestaModule):
                         exc_info=True,
                     )
 
-            # ---- L1 -> L2 ---------------------------------------------
-            if (
-                stats.level == PerspectiveLevel.L1_POS_FREE
-                and self._retention.should_promote_l2(stats)
-            ):
-                logger.info(
-                    f"{self.name}: promoting '{pid}' L1->L2."
-                )
-                t0 = time.time()
-                try:
-                    promote_to_l2(
-                        pid=pid,
-                        grouping_keys=stats.grouping_keys,
-                        metadata=self.metadata,
-                        storage=self.storage,
-                    )
-                    stats.l2_build_cost_ms = (time.time() - t0) * 1000
-                    self._catalog.promote(
-                        pid, PerspectiveLevel.L2_POS_ESTABLISHED
-                    )
-                except Exception as exc:
-                    logger.error(
-                        f"{self.name}: L2 promotion failed for "
-                        f"'{pid}': {exc}",
-                        exc_info=True,
-                    )
-
             # ---- L1 -> L0 demotion ----
             # Not while the perspective still has PERSISTENT pairs: they are
-            # maintained only for established (L1+) perspectives, so demoting
+            # maintained only for established (L1) perspectives, so demoting
             # would leave them marked PERSISTENT but frozen.  They are
             # demoted by their own predicate (below) first.
             has_persistent = any(
@@ -881,31 +843,8 @@ class Adaptive_Indexing(SiestaModule):
                 # so there is nothing to drop.  Just reset stats and level.
                 stats.l1_build_cost_ms = 0.0
                 stats.l1_maintenance_ms_per_batch = 0.0
+                stats.l1_maintenance_batch_count = 0.0
                 self._catalog.set_level(pid, PerspectiveLevel.L0_DECLARED)
-
-            # ---- L2 -> L1 demotion ----
-            elif (
-                stats.level == PerspectiveLevel.L2_POS_ESTABLISHED
-                and self._retention.should_demote_l2(stats)
-            ):
-                logger.info(f"{self.name}: demoting '{pid}' L2->L1.")
-                # Drop the compact positions overlay and the sequence metadata
-                # table.  The query planner will fall back to timestamp ordering.
-                try:
-                    spark = get_spark_session()
-                    for path in (
-                        _perspective_positions_path(self.metadata, pid),
-                        _perspective_seq_metadata_path(self.metadata, pid),
-                    ):
-                        spark.sql(f"DROP TABLE IF EXISTS delta.`{path}`")
-                    stats.l2_build_cost_ms = 0.0
-                    stats.l2_maintenance_ms_per_batch = 0.0
-                    self._catalog.set_level(pid, PerspectiveLevel.L1_POS_FREE)
-                except Exception as exc:
-                    logger.error(
-                        f"{self.name}: L2 demotion failed for '{pid}': {exc}",
-                        exc_info=True,
-                    )
 
             # ---- Per-pair retention -----------------------------------
             demoted: list = []
@@ -928,10 +867,6 @@ class Adaptive_Indexing(SiestaModule):
                                 lookback=stats.lookback,
                                 lookback_mode=stats.lookback_mode,
                                 grouping_keys=stats.grouping_keys,
-                                has_pos=(
-                                    stats.level
-                                    >= PerspectiveLevel.L2_POS_ESTABLISHED
-                                ),
                             )
                             pair_stats.build_cost_ms = (
                                 (time.time() - t0) * 1000
@@ -962,6 +897,9 @@ class Adaptive_Indexing(SiestaModule):
                         # eviction policy handles the final
                         # TRANSIENT -> ABSENT transition based on
                         # memory pressure.
+                        # B_pair counts batches since the last promotion.
+                        pair_stats.total_maintenance_ms = 0.0
+                        pair_stats.maintenance_batch_count = 0.0
                         demoted.append((act_a, act_b))
             # One catalog write for all of this perspective's demotions.
             self._catalog.promote_pairs(pid, demoted, PairStatus.TRANSIENT)

@@ -185,8 +185,12 @@ def part2(w, prep, eager_sample: int) -> None:
 # Part 3: embedded attributes vs join-back
 # ---------------------------------------------------------------------------
 
+P3_KIND = "all"     # --p3-kind: restrict part 3 to one query kind
+
+
 def _sample(ds: str, perspective: str, per: int, max_len: int = 15) -> list[dict]:
-    qs = [q for q in load_queries(ds, perspective) if q["length"] <= max_len]
+    qs = [q for q in load_queries(ds, perspective) if q["length"] <= max_len
+          and (P3_KIND == "all" or q["kind"] == P3_KIND)]
     out, seen = [], collections.Counter()
     for q in qs:
         k = (q["length"], q["kind"])
@@ -256,7 +260,11 @@ def main() -> None:
     ap.add_argument("--suffix", default="", help="result file suffix (e.g. .part3 for a part-3-only run)")
     ap.add_argument("--p3-systems", nargs="+", default=["eager", "adaptive"], choices=["eager", "adaptive"])
     ap.add_argument("--p3-case-only", action="store_true", help="part 3: case perspective only")
+    ap.add_argument("--p3-kind", choices=["all", "attribute", "structural"], default="all",
+                    help="part 3: query kind (attribute: only queries with attribute predicates)")
     args = ap.parse_args()
+    global P3_KIND
+    P3_KIND = args.p3_kind
     for ds in args.datasets:
         prep = prepare(ds)
         w = ResultWriter(EXPERIMENT, ds, suffix=args.suffix)
@@ -268,7 +276,8 @@ def main() -> None:
         if "2" in args.parts:
             part2(w, prep, args.eager_sample)
         if "3" in args.parts:
-            w.emit("part3_setup", per=args.per, max_length=args.p3_max_length, promotion="forced (min_query_count=1)",
+            w.emit("part3_setup", per=args.per, max_length=args.p3_max_length, kind=args.p3_kind,
+                   promotion="forced (min_query_count=1)",
                    systems=args.p3_systems, eager_warm="one unmeasured run before each measured run")
             part3(w, prep, args.per, args.p3_max_length, tuple(args.p3_systems), args.p3_case_only)
         w.done(elapsed_s=time.time() - t0)

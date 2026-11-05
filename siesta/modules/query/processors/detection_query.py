@@ -72,8 +72,8 @@ def _events_from_pairs(pattern: str, storage, metadata: MetaData, join_attrs: bo
 
     branch_required: dict[int, set[tuple[str, str]]] = {}
     for rp in pair_branches:
-        if rp.source_quantifier == SeqlQuantifier.STAR or rp.target_quantifier == SeqlQuantifier.STAR:
-            continue  # STAR-involved pairs are optional -> skip for pruning
+        if rp.source_quantifier.can_skip() or rp.target_quantifier.can_skip():
+            continue  # pairs with a * or ? endpoint are optional -> skip for pruning
         branch_required.setdefault(rp.branch_id, set()).add(
             (rp.source.label, rp.target.label)
         )

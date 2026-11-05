@@ -5,6 +5,7 @@ from collections import defaultdict
 import logging
 
 from siesta.modules.analyser.duration_format import format_duration
+from siesta.modules.analyser.business_time import apply_business_calendar, duration_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,18 @@ _LOOP_SCHEMA = ArrayType(StructType([
     # trace_id grouping) - null when the denominator (length/span) is zero.
     StructField("pct_trace_events", DoubleType(), True),
     StructField("pct_trace_time", DoubleType(), True),
+    # Events inside the loop's (merged) span flagged off_hours by a business
+    # calendar; always 0 when no calendar is applied.
+    StructField("off_hours_events", IntegerType(), False),
 ]))
+
+
+def _field(record, name, default=None):
+    """Read a field from a Spark Row or a plain dict, tolerating its absence."""
+    try:
+        return record[name]
+    except (KeyError, ValueError):
+        return default
 
 
 def _merge_intervals(intervals: list) -> list:
@@ -140,6 +152,7 @@ def _find_loops(sequence, max_pattern_length: int) -> list:
     ordered = sorted(sequence, key=lambda r: r["position"])
     activities = [r["activity"] for r in ordered]
     timestamps = [r["start_timestamp"] for r in ordered]
+    off_hours = [bool(_field(r, "off_hours", False)) for r in ordered]
     n = len(activities)
     group_len = n
     if timestamps[0] is not None and timestamps[-1] is not None:
@@ -162,6 +175,7 @@ def _find_loops(sequence, max_pattern_length: int) -> list:
             "pct_trace_time": (
                 (time_consumed / group_span) if (time_consumed is not None and group_span) else None
             ),
+            "off_hours_events": sum(sum(off_hours[s:e + 1]) for s, e in merged),
         })
 
     # --- self-loops: a immediately followed by a ---
@@ -211,6 +225,7 @@ def compute_loop_detection(
     include_repeats: bool = True,
     with_time_stats: bool = True,
     with_distribution: bool = False,
+    business_calendar: Optional[dict] = None,
 ) -> dict:
     """Detect loops in an indexed event log using distributed Spark processing.
 
@@ -250,6 +265,13 @@ def compute_loop_detection(
                            absolute seconds (time_dist_*) and as a share of the
                            trace's duration (pct_time_dist_*). Opt-in and
                            strictly additive; requires with_time_stats.
+        business_calendar: Optional working-time calendar (see business_time).
+                           When given, every time value is measured on the
+                           working clock (weekends, holidays and hours outside
+                           the working window do not count), *_human values use
+                           working days/weeks ("wd"/"ww"), and each entry gains
+                           off_hours_share - the fraction of its traces whose
+                           loop span includes at least one off-hours event.
 
     Returns:
         Dict with keys:
@@ -308,6 +330,13 @@ def compute_loop_detection(
             allowed = [grouping_value] if isinstance(grouping_value, str) else list(grouping_value)
             events_df = events_df.filter(F.col(group_cols[0]).isin(allowed))
 
+    # --- 2.5. Working-time clock (after scoping, so only kept events are mapped) ---
+    if business_calendar:
+        events_df = apply_business_calendar(events_df, business_calendar)
+        fmt = duration_formatter(business_calendar)
+    else:
+        fmt = format_duration
+
     # --- 3. Count total groups ---
     total_groups = events_df.select(*group_cols).distinct().count()
 
@@ -338,7 +367,8 @@ def compute_loop_detection(
     # --- 4. Collect ordered sequences per group and detect loops via UDF ---
     seq_df = events_df.groupBy(*group_cols).agg(
         F.collect_list(
-            F.struct(F.col("activity"), F.col("position"), F.col("start_timestamp"))
+            F.struct(F.col("activity"), F.col("position"), F.col("start_timestamp"),
+                     (F.col("off_hours") if business_calendar else F.lit(False)).alias("off_hours"))
         ).alias("sequence")
     )
 
@@ -347,7 +377,7 @@ def compute_loop_detection(
     # Explode: one row per (group, loop_pattern, loop_type) - already unique per
     # group since _find_loops emits at most one entry per (pattern, loop_type).
     loop_cols = ["pattern", "loop_type", "occurrences", "events_consumed",
-                 "time_consumed_sec", "pct_trace_events", "pct_trace_time"]
+                 "time_consumed_sec", "pct_trace_events", "pct_trace_time", "off_hours_events"]
     exploded = (
         loops_df
         .select(*group_cols, F.explode("loops").alias("loop"))
@@ -381,6 +411,9 @@ def compute_loop_detection(
             F.max("pct_trace_time").alias("pct_time_dist_max"),
             F.stddev_pop("pct_trace_time").alias("pct_time_dist_stddev"),
         ]
+    if business_calendar:
+        agg_exprs.append(
+            F.avg(F.when(F.col("off_hours_events") > 0, 1.0).otherwise(0.0)).alias("off_hours_share"))
     if trace_based and is_trace_grouping:
         agg_exprs.append(F.collect_list(F.col("trace_id")).alias("trace_ids"))
 
@@ -428,9 +461,9 @@ def compute_loop_detection(
                 "avg_pct_trace_events": _rounded(row["avg_pct_trace_events"]),
                 "median_pct_trace_events": _rounded(row["median_pct_trace_events"]),
                 "avg_time_consumed_sec": _rounded(row["avg_time_consumed_sec"], 3),
-                "avg_time_consumed_human": format_duration(row["avg_time_consumed_sec"]),
+                "avg_time_consumed_human": fmt(row["avg_time_consumed_sec"]),
                 "median_time_consumed_sec": _rounded(row["median_time_consumed_sec"], 3),
-                "median_time_consumed_human": format_duration(row["median_time_consumed_sec"]),
+                "median_time_consumed_human": fmt(row["median_time_consumed_sec"]),
                 "avg_pct_trace_time": _rounded(row["avg_pct_trace_time"]),
                 "median_pct_trace_time": _rounded(row["median_pct_trace_time"]),
             })
@@ -445,11 +478,11 @@ def compute_loop_detection(
                 "stddev": _rounded(row["time_dist_stddev"], 3),
             }
             entry["time_distribution_human"] = {
-                "min": format_duration(row["time_dist_min"]),
-                "p10": format_duration(t_pcts[0]), "p25": format_duration(t_pcts[1]),
-                "p50": format_duration(t_pcts[2]), "p75": format_duration(t_pcts[3]),
-                "p90": format_duration(t_pcts[4]), "max": format_duration(row["time_dist_max"]),
-                "stddev": format_duration(row["time_dist_stddev"]),
+                "min": fmt(row["time_dist_min"]),
+                "p10": fmt(t_pcts[0]), "p25": fmt(t_pcts[1]),
+                "p50": fmt(t_pcts[2]), "p75": fmt(t_pcts[3]),
+                "p90": fmt(t_pcts[4]), "max": fmt(row["time_dist_max"]),
+                "stddev": fmt(row["time_dist_stddev"]),
             }
             entry["pct_trace_time_distribution"] = {
                 "min": _rounded(row["pct_time_dist_min"]),
@@ -458,6 +491,8 @@ def compute_loop_detection(
                 "p90": _rounded(p_pcts[4]), "max": _rounded(row["pct_time_dist_max"]),
                 "stddev": _rounded(row["pct_time_dist_stddev"]),
             }
+        if business_calendar:
+            entry["off_hours_share"] = _rounded(row["off_hours_share"])
         if trace_based and is_trace_grouping:
             entry["trace_ids"] = sorted(row["trace_ids"])
 

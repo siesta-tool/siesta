@@ -46,12 +46,12 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
 from tests.vldb_eval.eval_common import (
-    RESULTS_DIR, LOOKBACK,
+    RESULTS_DIR, LOOKBACK, REPO_ROOT,
     discover_schema, ingest, query_adaptive, query_eager, run_meta,
 )
 from tests.vldb_eval.scaleout import cluster, shuffle, workload_scaleout
 
-DATA_DIR = Path("/srv/datasets/scaleout")
+DATA_DIR = REPO_ROOT / "datasets" / "scaleout"
 OUT_DIR = RESULTS_DIR / "exp_scaleout"
 CASE = "case"
 MAX_WORKER_CORES = cluster.N_WORKERS * cluster.WORKER_CORES  # 18

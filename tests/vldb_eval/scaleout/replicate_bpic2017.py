@@ -15,13 +15,13 @@ the query lookback window); ``--shift-days`` can spread copies across time if a
 non-overlapping layout is wanted.  ``--sample-frac`` subsamples distinct traces
 before replication.
 
-Output (default dir ``/srv/datasets/scaleout``):
+Output (default dir ``datasets/scaleout`` in the repository):
     bpic2017_r1.csv, bpic2017_r2.csv, bpic2017_r3.csv
 
 Usage:
     python -m tests.vldb_eval.scaleout.replicate_bpic2017 --factors 1 2 3
     python -m tests.vldb_eval.scaleout.replicate_bpic2017 --factors 1 \
-        --source /srv/datasets/bpic2017.xes --out-dir /srv/datasets/scaleout
+        --source datasets/bpic2017.xes --out-dir datasets/scaleout
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ if str(_REPO) not in sys.path:
 
 from tests.vldb_eval.batch_splitter import _iter_xes, _parse_ts, _shift_ts
 
-DEFAULT_SOURCE = Path("/srv/datasets/bpic2017.xes")
-DEFAULT_OUT_DIR = Path("/srv/datasets/scaleout")
+DEFAULT_SOURCE = _REPO / "datasets" / "bpic2017.xes"
+DEFAULT_OUT_DIR = _REPO / "datasets" / "scaleout"
 
 # Canonical columns always come first; attribute columns follow in first-seen
 # order so the CSV header is stable and readable.

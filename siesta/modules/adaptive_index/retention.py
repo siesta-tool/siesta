@@ -1,34 +1,32 @@
 """
 Stateless retention-predicate evaluator for the adaptive index lifecycle.
 
-Three independent predicates govern three independent granularities.
-All three share the same structure: a breakeven comparison between
+Two independent predicates govern two independent granularities.
+Both share the same structure: a breakeven comparison between
 the cumulative utility of maintaining an artefact and its total cost.
 
     Eq. 1  Perspective L1 retention
     --------------------------------------------------------------
     Retain G at L1 iff:
 
-        f_est_decayed * mean(s_est)  >  c_est1  +  mean(m_est) * f_est_decayed
+        f_est_decayed * mean(s_est)  >  c_est1  +  mean(m_est) * B_1
 
     Left-hand side:  cumulative time saved by having L1 materialised.
-    Right-hand side: one-time build cost + total maintenance cost over
-                     the observed (decayed) query history.
+    Right-hand side: one-time build cost + maintenance cost over the
+                     B_1 ingest batches maintained at L1.
 
-    Eq. 2  Perspective L2 retention (promotion from L1)
-    ---------------------------------------------------------------
-    Promote to L2 iff:
+    B_1 and B_pair are decayed batch counters, reset when the
+    artefact is demoted.  Like f, they decay with the half-life, so
+    both sides of a predicate cover the same recent window: with q
+    queries and b batches per unit time, the steady state compares
+    q * s against b * m (plus the build cost) rather than a bounded
+    decayed utility against an ever-growing lifetime maintenance cost.
 
-        f_pos_decayed * mean(s_pos)  >  c_est2  +  mean(m_pos) * f_pos_decayed
-
-    Gated by f_pos: if no query ever references pos, the LHS is zero
-    and L2 is never promoted regardless of L1 popularity.
-
-    Eq. 3  Pair L3 retention
+    Eq. 2  Pair L3 retention
     ----------------------------------------------------------------
     Persist pair (A, B) iff:
 
-        f_pair_decayed * mean(s_pair)  >  c_pair  +  mean(m_pair) * batches_per_query
+        f_pair_decayed * mean(s_pair)  >  c_pair  +  mean(m_pair) * B_pair
 
     Each pair's decision is independent.
 
@@ -140,10 +138,11 @@ class RetentionPolicy:
 
         Called lazily at the start of every predicate evaluation so
         that counters reflect demand recency without a background job.
-        Maintenance cost fields (l1_maintenance_ms_per_batch,
-        l2_maintenance_ms_per_batch) are NOT decayed — they are already
-        EMAs that self-update on each ingestion batch and should reflect
-        current steady-state cost, not historical query activity.
+        The per-batch maintenance cost (l1_maintenance_ms_per_batch) is
+        NOT decayed — it is already an EMA that self-updates on each
+        ingestion batch and should reflect current steady-state cost, not
+        historical query activity.  The batch count B_1 is decayed, like
+        the query counters.
         """
         now = time.time()
         if stats.last_decay_ts == 0.0:
@@ -155,17 +154,16 @@ class RetentionPolicy:
         factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
         stats.l1_query_count *= factor
         stats.l1_total_savings_ms *= factor
-        stats.l2_pos_query_count *= factor
-        stats.l2_total_savings_ms *= factor
+        stats.l1_maintenance_batch_count *= factor
         stats.last_decay_ts = now
 
     def _decay_pair(self, ps: PairStats) -> None:
         """
         Apply exponential decay to pair counters in place.
 
-        Same rationale as _decay_perspective.  total_maintenance_ms
-        and maintenance_batch_count are NOT decayed — they accumulate
-        physical cost that should not be forgotten by decay.
+        Same rationale as _decay_perspective.  total_maintenance_ms and
+        maintenance_batch_count decay by the same factor, so the mean
+        per-batch maintenance cost is unchanged while B_pair decays.
         """
         now = time.time()
         if ps.last_decay_ts == 0.0:
@@ -177,6 +175,8 @@ class RetentionPolicy:
         factor = math.exp(-elapsed * math.log(2) / self.half_life_seconds)
         ps.query_count *= factor
         ps.total_savings_ms *= factor
+        ps.total_maintenance_ms *= factor
+        ps.maintenance_batch_count *= factor
         ps.last_decay_ts = now
 
     def decay_perspective(self, stats: PerspectiveStats) -> None:
@@ -199,20 +199,25 @@ class RetentionPolicy:
         plus estimated total maintenance cost by at least (1 + ε).
         Returns False when there is insufficient data (< min_query_count
         queries after decay).
+
+        L1 materialises nothing, so its build cost, maintenance and
+        savings are all zero; with nothing to amortise, the demand gate
+        alone decides.  (The query path promotes L0 -> L1 on first touch
+        anyway; this is the ingest-time backstop.)
         """
         self._decay_perspective(stats)
 
         if not _reached(stats.l1_query_count, self.min_query_count):
-            return False
-        if stats.l1_build_cost_ms <= 0.0:
             return False
 
         mean_savings = stats.l1_total_savings_ms / stats.l1_query_count
         utility = stats.l1_query_count * mean_savings
         cost = (
             stats.l1_build_cost_ms
-            + stats.l1_maintenance_ms_per_batch * stats.l1_query_count
+            + stats.l1_maintenance_ms_per_batch * stats.l1_maintenance_batch_count
         )
+        if cost <= 0.0:
+            return True
         return utility > cost * self.cost_scale * (1 + self.hysteresis)
 
     def should_demote_l1(self, stats: PerspectiveStats) -> bool:
@@ -222,7 +227,8 @@ class RetentionPolicy:
         A perspective whose decayed query count has reached zero has
         seen no recent demand and is unconditionally eligible for
         demotion.  Otherwise demotion fires when utility drops below
-        (1 - ε) * cost.
+        (1 - ε) * cost.  At zero cost (L1 as implemented) that never
+        happens, so L1 is kept exactly while it sees demand.
         """
         self._decay_perspective(stats)
 
@@ -233,62 +239,12 @@ class RetentionPolicy:
         utility = stats.l1_query_count * mean_savings
         cost = (
             stats.l1_build_cost_ms
-            + stats.l1_maintenance_ms_per_batch * stats.l1_query_count
+            + stats.l1_maintenance_ms_per_batch * stats.l1_maintenance_batch_count
         )
         return utility < cost * self.cost_scale * (1 - self.hysteresis)
 
     # ------------------------------------------------------------------
-    # Eq. 2  Perspective L2 (promotion from L1)
-    # ------------------------------------------------------------------
-
-    def should_promote_l2(self, stats: PerspectiveStats) -> bool:
-        """
-        Should perspective G be promoted from L1 to L2?
-
-        Hard-gated by l2_pos_query_count: if no query has ever
-        referenced pos after decay, the LHS is zero and L2 is never
-        justified regardless of L1 popularity.
-        """
-        self._decay_perspective(stats)
-
-        if not _reached(stats.l2_pos_query_count, self.min_query_count):
-            return False
-        if stats.l2_build_cost_ms <= 0.0:
-            return False
-
-        mean_savings = stats.l2_total_savings_ms / stats.l2_pos_query_count
-        utility = stats.l2_pos_query_count * mean_savings
-        cost = (
-            stats.l2_build_cost_ms
-            + stats.l2_maintenance_ms_per_batch * stats.l2_pos_query_count
-        )
-        return utility > cost * self.cost_scale * (1 + self.hysteresis)
-
-    def should_demote_l2(self, stats: PerspectiveStats) -> bool:
-        """
-        Should perspective G be demoted from L2 back to L1?
-
-        When the decayed pos query count reaches zero, L2 maintenance
-        is unjustified — no query has referenced pos recently enough
-        to matter.  Demotion stops positional annotation from being
-        maintained incrementally; the query planner falls back to
-        timestamp-based sorting for existing pair indices.
-        """
-        self._decay_perspective(stats)
-
-        if _is_zero(stats.l2_pos_query_count):
-            return True
-
-        mean_savings = stats.l2_total_savings_ms / stats.l2_pos_query_count
-        utility = stats.l2_pos_query_count * mean_savings
-        cost = (
-            stats.l2_build_cost_ms
-            + stats.l2_maintenance_ms_per_batch * stats.l2_pos_query_count
-        )
-        return utility < cost * self.cost_scale * (1 - self.hysteresis)
-
-    # ------------------------------------------------------------------
-    # Eq. 3  Pair L3
+    # Eq. 2  Pair L3
     # ------------------------------------------------------------------
 
     def should_persist_pair(self, ps: PairStats) -> bool:
@@ -435,41 +391,14 @@ class RetentionPolicy:
         utility = stats.l1_query_count * mean_savings
         cost = (
             stats.l1_build_cost_ms
-            + stats.l1_maintenance_ms_per_batch * stats.l1_query_count
+            + stats.l1_maintenance_ms_per_batch * stats.l1_maintenance_batch_count
         )
         return {
             "query_count_decayed":      stats.l1_query_count,
             "mean_savings_ms":          round(mean_savings, 2),
             "build_cost_ms":            round(stats.l1_build_cost_ms, 2),
             "maintenance_ms_per_batch": round(stats.l1_maintenance_ms_per_batch, 2),
-            "utility":                  round(utility, 4),
-            "cost":                     round(cost, 4),
-            "ratio":  round(utility / cost, 4) if cost > 0 else float("inf"),
-            "promote_threshold":        round(1 + self.hysteresis, 2),
-            "demote_threshold":         round(1 - self.hysteresis, 2),
-        }
-
-    def explain_l2(self, stats: PerspectiveStats) -> dict:
-        """Same as explain_l1 but for the L2 predicate."""
-        self._decay_perspective(stats)
-
-        if _is_zero(stats.l2_pos_query_count):
-            return {
-                "pos_query_count": 0,
-                "verdict": "insufficient_data (no pos queries)",
-            }
-
-        mean_savings = stats.l2_total_savings_ms / stats.l2_pos_query_count
-        utility = stats.l2_pos_query_count * mean_savings
-        cost = (
-            stats.l2_build_cost_ms
-            + stats.l2_maintenance_ms_per_batch * stats.l2_pos_query_count
-        )
-        return {
-            "pos_query_count_decayed":  stats.l2_pos_query_count,
-            "mean_savings_ms":          round(mean_savings, 2),
-            "build_cost_ms":            round(stats.l2_build_cost_ms, 2),
-            "maintenance_ms_per_batch": round(stats.l2_maintenance_ms_per_batch, 2),
+            "maintenance_batch_count":  stats.l1_maintenance_batch_count,
             "utility":                  round(utility, 4),
             "cost":                     round(cost, 4),
             "ratio":  round(utility / cost, 4) if cost > 0 else float("inf"),

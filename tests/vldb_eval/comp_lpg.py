@@ -28,7 +28,7 @@ shared-entity join with a join-order hint::
     WHERE n.type = $t AND e1.activity = $a1 AND ... AND ci.gpos < cj.gpos (all i < j)
       AND <literal preds e_i.attr = $v>  AND <bindings e_i.attr = / <> e_j.attr>
     HINT (((e3 JOIN c3) JOIN n) JOIN (c7 JOIN e7)) JOIN ...
-    RETURN count(DISTINCT n.uid)
+    RETURN DISTINCT n.uid      (all matching entity ids are fetched; counted client-side)
 
 NULL never satisfies a predicate (Cypher's three-valued logic), strictly
 increasing gpos makes the pattern events distinct and ordered.  The join
@@ -96,8 +96,11 @@ def open_db(ds: str, buffer_gb: float, threads: int, read_only: bool = False) ->
     return db, conn
 
 
+CASE_ONLY = False   # --case-only: one case index; perspectives are grouped at query time
+
+
 def entity_types(ds: str) -> list[str]:
-    return ["case"] + pc.PERSPECTIVES.get(ds, [])
+    return ["case"] if CASE_ONLY else ["case"] + pc.PERSPECTIVES.get(ds, [])
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +301,7 @@ def translate(query: dict, attrs: set[str], order: str = "anchor",
             hint = f"(({hint} JOIN c{i}) JOIN e{i})"
     text = ("MATCH " + ", ".join(pats) + "\nWHERE " + "\n  AND ".join(where)
             + (f"\nHINT {hint}" if hint else "")
-            + "\nRETURN count(DISTINCT n.uid) AS matched")
+            + "\nRETURN DISTINCT n.uid AS g")
     return text, params
 
 
@@ -313,7 +316,7 @@ def translate_stepwise(query: dict, attrs: set[str]) -> tuple[str, dict]:
         MATCH (n)<-[c2:CORR]-(e2:Event) WHERE e2.activity = $a2 AND c2.gpos > p1 AND e2.`attr` = b1_0 ...
         WITH n, ..., min(c2.gpos) AS p2
         ...
-        RETURN count(DISTINCT n.uid)
+        RETURN DISTINCT n.uid      (all matching entity ids are fetched; counted client-side)
 
     For a fixed state (entity, values referenced by later events) the
     earliest position dominates, so this is exact (it is the memoised
@@ -362,11 +365,14 @@ def translate_stepwise(query: dict, attrs: set[str]) -> tuple[str, dict]:
                 elif j == i:
                     keep.append(f"NULL AS {nm}")
             parts.append("WITH " + ", ".join(keep) + f", min(c{i}.gpos) AS p{i}")
-    parts.append("RETURN count(DISTINCT n.uid) AS matched")
+    parts.append("RETURN DISTINCT n.uid AS g")
     return "\n".join(parts), params
 
 
 def translate_plan(query: dict, attrs: set[str], plan: str, act_freq: dict[str, int] | None) -> tuple[str, dict]:
+    if "elements" in query:  # complex-operator suite (pattern_complex)
+        from tests.vldb_eval.pattern_complex import cypher
+        return cypher(query)
     if plan == "stepwise":
         return translate_stepwise(query, attrs)
     return translate(query, attrs, plan, act_freq)
@@ -380,8 +386,10 @@ def run_query(conn: kuzu.Connection, text: str, params: dict) -> tuple[float, in
     t0 = time.perf_counter()
     try:
         res = conn.execute(text, params)
-        n = int(res.get_next()[0])
-        return time.perf_counter() - t0, n, False, None
+        groups = set()
+        while res.has_next():          # fetch every matching entity id, like the other systems
+            groups.add(res.get_next()[0])
+        return time.perf_counter() - t0, len(groups), False, None
     except RuntimeError as ex:
         dt = time.perf_counter() - t0
         msg = str(ex)
@@ -405,6 +413,15 @@ def run(ds: str, persp: str, conn: kuzu.Connection, setup_rec: dict, args) -> No
         with open(args.queries) as fq:
             qs = [json.loads(l) for l in fq if l.strip()]
         qs = [x for x in qs if x["dataset"] == ds and x["perspective"] == persp]
+    elif args.suite == "complex":
+        from tests.vldb_eval.pattern_complex import load as load_complex
+        qs = load_complex(ds, persp)
+    elif args.suite == "long20":
+        from tests.vldb_eval.pattern_long import load as load_long
+        qs = load_long(ds, persp)
+    elif args.suite == "bgl":      # structural + attribute-aware (no bindings: Cypher has no $1)
+        from tests.vldb_eval.pattern_bgl import load as load_bgl
+        qs = [x for x in load_bgl(ds, persp) if x["kind"] != "binding"]
     else:
         qs = pc.load_queries(ds, persp)
     if args.qids:
@@ -413,16 +430,33 @@ def run(ds: str, persp: str, conn: kuzu.Connection, setup_rec: dict, args) -> No
         qs = pick_limit(qs, args.limit)
     attrs = set(conn._get_node_property_names("Event"))
     freq = activity_freq(conn, persp)
-    out = Path(args.out) if args.out else out_path(ds, persp, args.plan)
+    variant = args.plan
+    if args.suite in ("long20", "bgl"):      # naive single-MATCH Cypher, or the better stepwise Cypher
+        from tests.vldb_eval.pattern_long import cypher_plain, cypher_stepwise
+        variant = "stepwise" if args.plan == "stepwise" else "plain"
+        long_tr = cypher_stepwise if variant == "stepwise" else cypher_plain
+    out = Path(args.out) if args.out else (
+        LPG_DIR / args.suite / f"{ds}.{pc.safe(persp)}{'' if variant == 'plain' else '.' + variant}.jsonl"
+        if args.suite in ("long20", "bgl") else
+        LPG_DIR / args.suite / f"{ds}.{pc.safe(persp)}.jsonl" if args.suite
+        else out_path(ds, persp, args.plan))
+    if args.suite in ("long20", "bgl"):
+
+        def tr(x):
+            return long_tr(x)
+    else:
+        def tr(x):
+            return translate_plan(x, attrs, args.plan, freq)
     out.parent.mkdir(parents=True, exist_ok=True)
     conn.set_query_timeout(int(args.timeout * 1000))
     with out.open("w") as f:
         rec = dict(setup_rec)
-        rec.update({"perspective": persp, "plan": args.plan, "timeout_s": args.timeout})
+        rec.update({"perspective": persp, "plan": variant, "timeout_s": args.timeout,
+                    "suite": args.suite or None, "case_only": CASE_ONLY})
         f.write(json.dumps(rec) + "\n")
         f.flush()
         if qs:  # warm-up: one discarded query
-            text, params = translate_plan(qs[0], attrs, args.plan, freq)
+            text, params = tr(qs[0])
             dt, n, to, err = run_query(conn, text, params)
             print(f"[{ds}/{persp}] warm-up {qs[0]['qid']}: {dt:.3f}s n={n} timeout={to} err={err}", flush=True)
         ok = tot = 0
@@ -432,7 +466,7 @@ def run(ds: str, persp: str, conn: kuzu.Connection, setup_rec: dict, args) -> No
             for x in qs:
                 if x["qid"] in skipped or (rep == 0 and args.skip_after and streak.get(x["kind"], 0) >= args.skip_after):
                     skipped.add(x["qid"])
-                    r = {"system": "lpg", "variant": args.plan, "qid": x["qid"], "dataset": ds,
+                    r = {"system": "lpg", "variant": variant, "qid": x["qid"], "dataset": ds,
                          "perspective": persp, "length": x["length"], "kind": x["kind"], "rep": rep,
                          "time_s": None, "matched_groups": None, "truth": x["truth"]["matched_groups"],
                          "parity": None, "timed_out": True, "skipped": True, "error": None}
@@ -440,7 +474,7 @@ def run(ds: str, persp: str, conn: kuzu.Connection, setup_rec: dict, args) -> No
                     print(f"[{ds}/{persp}] {x['qid']} rep={rep} skipped (--skip-after {args.skip_after})", flush=True)
                     tot += 1
                     continue
-                text, params = translate_plan(x, attrs, args.plan, freq)
+                text, params = tr(x)
                 dt, n, to, err = run_query(conn, text, params)
                 if rep == 0:
                     streak[x["kind"]] = streak.get(x["kind"], 0) + 1 if to else 0
@@ -448,7 +482,7 @@ def run(ds: str, persp: str, conn: kuzu.Connection, setup_rec: dict, args) -> No
                 parity = None if n is None else (n == truth)
                 tot += 1
                 ok += bool(parity)
-                r = {"system": "lpg", "variant": args.plan, "qid": x["qid"], "dataset": ds, "perspective": persp,
+                r = {"system": "lpg", "variant": variant, "qid": x["qid"], "dataset": ds, "perspective": persp,
                      "length": x["length"], "kind": x["kind"], "rep": rep, "time_s": dt,
                      "matched_groups": n, "truth": truth, "parity": parity,
                      "timed_out": to, "skipped": False, "error": err}
@@ -493,6 +527,10 @@ def main() -> None:
                     help="after N consecutive timeouts of a kind (queries run by increasing length), record "
                          "the remaining queries of that kind as timed out without running them "
                          "(skipped: true, time_s: null); 0 = run everything")
+    ap.add_argument("--case-only", action="store_true",
+                    help="build only case entities; other perspectives join Event nodes at query time")
+    ap.add_argument("--suite", default="", choices=["", "complex", "long20", "bgl"],
+                    help="query suite (complex: pattern_complex, long20: pattern_long, plain Cypher)")
     ap.add_argument("--plan", choices=PLANS, default=DEFAULT_PLAN,
                     help="join order hint of the shared-entity join (anchor|entity|plain, see translate) "
                          "or the stepwise alternative (see translate_stepwise); non-default plans "
@@ -500,9 +538,11 @@ def main() -> None:
     ap.add_argument("--buffer-gb", type=float, default=DEFAULT_BUFFER_GB)
     ap.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     args = ap.parse_args()
+    global CASE_ONLY
+    CASE_ONLY = args.case_only
 
     for ds in args.datasets:
-        persps = args.perspectives if args.perspectives is not None else entity_types(ds)
+        persps = args.perspectives if args.perspectives is not None else ["case"] + pc.PERSPECTIVES.get(ds, [])
         if args.setup or (args.setup is None and not db_path(ds).exists()):
             print(f"[{ds}] building {db_path(ds)}", flush=True)
             setup_rec = build(ds, args.buffer_gb, args.threads)
@@ -514,7 +554,7 @@ def main() -> None:
             setup_rec = load_setup(ds)
         db, conn = open_db(ds, args.buffer_gb, args.threads, read_only=True)
         for persp in persps:
-            if not args.queries and not pc.query_path(ds, persp).exists():
+            if not args.queries and not args.suite and not pc.query_path(ds, persp).exists():
                 print(f"[{ds}/{persp}] no query file {pc.query_path(ds, persp)}", file=sys.stderr)
                 continue
             run(ds, persp, conn, setup_rec, args)

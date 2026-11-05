@@ -4,8 +4,10 @@ from pyspark.sql.types import *
 
 class PerspectiveLevel(IntEnum):
     L0_DECLARED         = 0     # only grouping key G in catalog, no physical change
-    L1_POS_FREE         = 1     # grouping column v materialised in SequenceTable
-    L2_POS_ESTABLISHED  = 2     # pos column materialised, SequenceMetadata maintained
+    L1_POS_FREE         = 1     # established: phi_G evaluated on read, pairs may persist
+    # 2 was L2 (a per-perspective positions overlay); removed, since
+    # positions ranked on read are identical and pair records carry them.
+    # Catalogs that still hold 2 load as L1 (see catalog._row_to_stats).
     L3_PAIR_PERSISTED   = 3     # full PairsIndex[A,B] + LastChecked + incremental maint.
 
 class PairStatus(IntEnum):
@@ -19,8 +21,8 @@ class PairStats:
     build_cost_ms: float = 0.0       # c_pair, measured on first build
     query_count: float = 0.0         # f_pair, decayed number of queries touching this pair
     total_savings_ms: float = 0.0    # cumulative savings vs lazy scan
-    total_maintenance_ms: float = 0.0
-    maintenance_batch_count: int = 0
+    total_maintenance_ms: float = 0.0    # decayed, with maintenance_batch_count
+    maintenance_batch_count: float = 0.0 # B_pair, decayed batch count
     status: PairStatus = PairStatus.ABSENT
     last_accessed_ts: float = 0.0
     last_decay_ts: float = 0.0
@@ -42,11 +44,7 @@ class PerspectiveStats:
     l1_query_count: float = 0.0      # decayed
     l1_total_savings_ms: float = 0.0
     l1_maintenance_ms_per_batch: float = 0.0
-    # L2 stats
-    l2_build_cost_ms: float = 0.0
-    l2_pos_query_count: float = 0.0  # f_pos: decayed queries referencing pos
-    l2_total_savings_ms: float = 0.0
-    l2_maintenance_ms_per_batch: float = 0.0
+    l1_maintenance_batch_count: float = 0.0  # B_1: decayed batches maintained at L1
     # Per-pair stats: keyed by (A, B)
     pairs: dict[tuple[str,str], PairStats] = field(default_factory=dict)
     last_decay_ts: float = 0.0   #  wall-clock when counters were last decayed

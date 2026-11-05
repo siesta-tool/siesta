@@ -50,7 +50,7 @@ if str(_REPO) not in sys.path:
 
 from tests.vldb_eval.eval_common import RESULTS_DIR, quote_label
 
-BASE_CSV = Path("/srv/datasets/scaleout/bpic2017_r1.csv")
+BASE_CSV = _REPO / "datasets" / "scaleout" / "bpic2017_r1.csv"
 WORKLOAD_JSON = RESULTS_DIR / "exp_scaleout" / "workload.json"
 CASE = "case"
 

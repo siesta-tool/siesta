@@ -7,7 +7,7 @@ Lifecycle of a single query
 
 2.  The planner consults the PerspectiveCatalog to resolve the
     perspective.  If the perspective is at L0, the planner promotes
-    it to L1 (and to L2 if the pattern references pos) on the spot.
+    it to L1 on the spot.
     This is the synchronous first-touch promotion from the design
     notes.
 
@@ -24,10 +24,10 @@ Lifecycle of a single query
     exploration processor, which runs the same pruning + CEP
     validation logic as the eager module but keyed on the group
     value v instead of trace_id, and sorting pseudo-sequences by
-    ts (L1) or pos (L2) according to the plan.
+    ts, with the intra-group position (ranked on read) as tie-breaker.
 
 5.  After the query completes, the planner records workload
-    statistics (pairs touched, savings, pos reference) into the
+    statistics (pairs touched, savings) into the
     catalog and flushes.
 
 LRU cache
@@ -75,7 +75,6 @@ from siesta.modules.adaptive_index.builders import (
     build_pair_transient,
     build_pairs_transient_batched,
     promote_to_l1,
-    promote_to_l2,
     _get_perspective_seq_df,
     _grouping_col,
     _perspective_pair_path,
@@ -117,6 +116,7 @@ from siesta.modules.query.processors.stats_query import (
     process_stats_query as eager_process_stats,
 )
 from siesta.modules.query.CEP_adapter import find_occurrences_dsl
+from siesta.modules.adaptive_query.automaton import compile_automaton, match_events
 from siesta.model.DataModel import EventPair
 
 import pandas as pd
@@ -562,7 +562,6 @@ class Adaptive_Querying(SiestaModule):
             grouping_keys=grouping_keys,
             metadata=metadata,
             storage=storage,
-            has_pos=stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED,
         )
         for pair, ms in costs.items():
             catalog.record_pair_build_cost(pid, pair[0], pair[1], ms)
@@ -775,19 +774,25 @@ class Adaptive_Querying(SiestaModule):
         Decide how the pattern is answered.
 
         Returns:
-          "single" — exactly one unconstrained responded pair; answered from
-                     the pair rows directly (min position-pair per group).
-          "cep"    — anything else: the general CEP path.
+          "single"    — exactly one unconstrained responded pair; answered
+                        from the pair rows directly (min position-pair per group).
+          "automaton" — a binding-free sequence pattern (see automaton.py):
+                        each candidate group is validated in one linear pass
+                        over its events instead of by the CEP engine.  Turned
+                        off with ``validator = "cep"`` in the query config.
+          "cep"       — anything else: the general CEP path.
 
         A native multi-pair chain join is not used: stitching STNM pair rows
         on a shared position misses matches, because a source that falls
         before the previous pair's target is skipped (e.g. ``A B C`` on
         ``B A B C`` has no (B, C) row starting at the second B).
         """
-        if len({rp.branch_id for rp in pair_branches}) > 1:
-            return "cep"
-        if self._cep_is_redundant(pair_branches, info_pairs):
+        if (len({rp.branch_id for rp in pair_branches}) == 1
+                and self._cep_is_redundant(pair_branches, info_pairs)):
             return "single"
+        if (self.query_config.get("validator", "automaton") != "cep"
+                and compile_automaton(pattern) is not None):
+            return "automaton"
         return "cep"
 
     def _run_adaptive_detection(self) -> Any:
@@ -826,24 +831,13 @@ class Adaptive_Querying(SiestaModule):
             lookback_mode=lookback_mode,
         )
 
-        references_pos = self._pattern_references_pos(pattern)
-
         if stats.level < PerspectiveLevel.L1_POS_FREE:
             logger.info(f"{self.name}: promoting '{pid}' L0->L1.")
-            t0 = time.time()
-            promote_to_l1(pid, grouping_keys, self.metadata, self.storage)
-            stats.l1_build_cost_ms = (time.time() - t0) * 1000
+            # L1 materialises nothing: its build cost is exactly 0, not
+            # the wall-clock time of the bookkeeping call.
+            stats.l1_build_cost_ms = promote_to_l1(pid, grouping_keys, self.metadata, self.storage)
             catalog.promote(pid, PerspectiveLevel.L1_POS_FREE)
 
-        if references_pos and stats.level < PerspectiveLevel.L2_POS_ESTABLISHED:
-            logger.info(f"{self.name}: promoting '{pid}' L1->L2.")
-            t0 = time.time()
-            promote_to_l2(pid, grouping_keys, self.metadata, self.storage)
-            stats.l2_build_cost_ms = (time.time() - t0) * 1000
-            catalog.promote(pid, PerspectiveLevel.L2_POS_ESTABLISHED)
-
-        has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
-        sort_key = "position" if (references_pos and has_pos) else "start_timestamp"
         tm["resolve"] = time.time() - t_start
 
         t0 = time.time()
@@ -854,13 +848,11 @@ class Adaptive_Querying(SiestaModule):
             # A single-event match involves no pair, so pair tables cannot
             # deliver it: hand CEP every event of the pattern's activities.
             t0 = time.time()
-            result = self._detect_from_group_events(
-                pattern, pid, grouping_keys, has_pos, sort_key,
-            )
+            result = self._detect_from_group_events(pattern, pid, grouping_keys)
             tm["validate"] = time.time() - t0
             return self._finish_detection(
                 catalog, pid, stats, result, set(), {},
-                references_pos, support_threshold, group_count, t_start,
+                support_threshold, group_count, t_start,
                 tm, pair_sources, status_before,
             )
 
@@ -874,6 +866,7 @@ class Adaptive_Querying(SiestaModule):
         # Decide the execution mode (single-pair skip / multi-pair chain join
         # / CEP) up front so we fetch exactly the pairs each path needs.
         mode = self._fast_path_mode(pattern, pair_branches, info_pairs)
+        logger.info(f"{self.name}: detection mode={mode} pattern={pattern!r}")
         if mode == "single":
             # An unconstrained single pair has no info-pairs to fetch.
             all_pairs_2d = set(all_responded)
@@ -978,7 +971,6 @@ class Adaptive_Querying(SiestaModule):
                 grouping_keys=grouping_keys,
                 metadata=self.metadata,
                 storage=self.storage,
-                has_pos=has_pos,
             )
             # All absent pairs shared one scan; attribute the amortised
             # per-pair share so the retention policy sees the true
@@ -1026,7 +1018,7 @@ class Adaptive_Querying(SiestaModule):
             tm["validate"] = 0.0
             return self._finish_detection(
                 catalog, pid, stats, [], all_pairs_2d, lazy_costs,
-                references_pos, support_threshold, group_count, t_start,
+                support_threshold, group_count, t_start,
                 tm, pair_sources, status_before,
             )
 
@@ -1041,9 +1033,11 @@ class Adaptive_Querying(SiestaModule):
         # (A, B) row of its own (see build_event_keep_predicate).
         branch_required: dict[int, set[tuple[str, str]]] = {}
         for rp in pair_branches:
+            # A pair with an endpoint that may not occur (``*`` or ``?``)
+            # need not be present in a matching group.
             if (
-                rp.source_quantifier == SeqlQuantifier.STAR
-                or rp.target_quantifier == SeqlQuantifier.STAR
+                rp.source_quantifier.can_skip()
+                or rp.target_quantifier.can_skip()
             ):
                 continue
             branch_required.setdefault(rp.branch_id, set()).add(
@@ -1089,11 +1083,11 @@ class Adaptive_Querying(SiestaModule):
             if has_attribute_constraints(pattern):
                 rows_df = join_back_attributes(
                     rows_df.join(pruned_group_ids, on="trace_id", how="left_semi"),
-                    self._attribute_events(pid, grouping_keys, has_pos, pattern, pruned_group_ids),
+                    self._attribute_events(pid, grouping_keys, pattern, pruned_group_ids),
                 )
             tm["join_back_plan"] = time.time() - t0
 
-        keep_pred = build_event_keep_predicate(pattern) if mode == "cep" else None
+        keep_pred = build_event_keep_predicate(pattern) if mode in ("cep", "automaton") else None
         cep_rows_df = rows_df.where(keep_pred) if keep_pred is not None else rows_df
 
         pair_positions_df = (
@@ -1189,7 +1183,9 @@ class Adaptive_Querying(SiestaModule):
         # exactly the groups that contain a (source, target)
         # co-occurrence in the right order, and each surviving row
         # carries the matching positions directly.
-        sort_field = "position" if sort_key == "position" else "timestamp"
+        # Order by timestamp; ties fall back to the intra-group position,
+        # which is ranked on read in that same order.
+        sort_field = "timestamp"
 
         if mode == "single":
             rp = next(iter(pair_branches))
@@ -1241,6 +1237,8 @@ class Adaptive_Querying(SiestaModule):
                 )
             )
 
+            spec = compile_automaton(pattern) if mode == "automaton" else None
+
             def validate_group(group_id_rows):
                 group_id, rows = group_id_rows
                 rows = list(rows)
@@ -1270,6 +1268,9 @@ class Adaptive_Querying(SiestaModule):
                     key=lambda e: (int(e[sort_field]), int(e["position"])),
                 )
 
+                if spec is not None:
+                    # one linear pass; returns the positions of one match
+                    return (group_id, match_events(events, spec))
                 positions = find_occurrences_dsl(
                     [e["name"] for e in events],
                     pattern,
@@ -1291,11 +1292,11 @@ class Adaptive_Querying(SiestaModule):
 
         return self._finish_detection(
             catalog, pid, stats, result, all_pairs_2d, lazy_costs,
-            references_pos, support_threshold, group_count, t_start,
+            support_threshold, group_count, t_start,
             tm, pair_sources, status_before,
         )
 
-    def _attribute_events(self, pid, grouping_keys, has_pos, pattern, group_ids_df) -> DataFrame:
+    def _attribute_events(self, pid, grouping_keys, pattern, group_ids_df) -> DataFrame:
         """
         (trace_id, position, attributes) of the pattern's activities, with
         the positions the perspective's pair tables use.  Under the case
@@ -1311,22 +1312,22 @@ class Adaptive_Querying(SiestaModule):
             grouping_keys=grouping_keys,
             metadata=self.metadata,
             storage=self.storage,
-            has_pos=has_pos,
             group_ids_df=group_ids_df,
         ).where(col("activity").isin(labels))
 
-    def _detect_from_group_events(self, pattern, pid, grouping_keys, has_pos, sort_key):
+    def _detect_from_group_events(self, pattern, pid, grouping_keys):
         """
         Run CEP over each group's events of the pattern's activities, read
         from the perspective's sequence (group positions as in pair tables).
         """
-        sort_field = "position" if sort_key == "position" else "timestamp"
+        # Order by timestamp; ties fall back to the intra-group position,
+        # which is ranked on read in that same order.
+        sort_field = "timestamp"
         seq_df = _get_perspective_seq_df(
             pid=pid,
             grouping_keys=grouping_keys,
             metadata=self.metadata,
             storage=self.storage,
-            has_pos=has_pos,
         ).where(col("activity").isin(sorted(pattern_labels(pattern))))
 
         def to_event(r):
@@ -1371,7 +1372,7 @@ class Adaptive_Querying(SiestaModule):
         return GROUP_COUNTS[key]
 
     def _finish_detection(self, catalog, pid, stats, result, all_pairs_2d, lazy_costs,
-                          references_pos, support_threshold, group_count, t_start,
+                          support_threshold, group_count, t_start,
                           tm=None, pair_sources=None, status_before=None):
         """
         Step 6 (workload statistics, promotion) and response formatting.
@@ -1390,8 +1391,6 @@ class Adaptive_Querying(SiestaModule):
         catalog.record_query_touch(
             pid=pid,
             pairs_touched=list(all_pairs_2d),
-            references_pos=references_pos,
-            total_query_ms=(time.time() - t_start) * 1000,
             pair_savings_ms={
                 (a, b): (
                     stats.pairs.get((a, b), PairStats()).build_cost_ms
@@ -1414,7 +1413,7 @@ class Adaptive_Querying(SiestaModule):
         def _promote_and_flush():
             try:
                 self._maybe_promote_after_query(
-                    pid, pairs_touched, references_pos, metadata, retention,
+                    pid, pairs_touched, metadata, retention,
                 )
             finally:
                 catalog.flush()
@@ -1508,16 +1507,13 @@ class Adaptive_Querying(SiestaModule):
 
         # Ensure at least L1 so we can read the sequence table.
         if stats.level < PerspectiveLevel.L1_POS_FREE:
-            t0 = time.time()
-            promote_to_l1(pid, grouping_keys, self.metadata, self.storage)
-            stats.l1_build_cost_ms = (time.time() - t0) * 1000
+            stats.l1_build_cost_ms = promote_to_l1(pid, grouping_keys, self.metadata, self.storage)
             catalog.promote(pid, PerspectiveLevel.L1_POS_FREE)
 
         # Read the per-perspective PairsIndex to find which activities
         # follow pattern_suffix.  Check both persisted pairs and the
         # activity index for candidate targets.
         spark = get_spark_session()
-        has_pos = stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED
 
         try:
             seq_df = _get_perspective_seq_df(
@@ -1525,7 +1521,6 @@ class Adaptive_Querying(SiestaModule):
                 grouping_keys=grouping_keys,
                 metadata=self.metadata,
                 storage=self.storage,
-                has_pos=has_pos,
             )
         except Exception:
             return {
@@ -1616,8 +1611,7 @@ class Adaptive_Querying(SiestaModule):
             self._retention_params = params
         return self._retention
 
-    def _maybe_promote_after_query(self, pid, pairs_touched, references_pos,
-                                   metadata, retention):
+    def _maybe_promote_after_query(self, pid, pairs_touched, metadata, retention):
         """
         Lightweight per-pair retention check after each query.
 
@@ -1633,17 +1627,6 @@ class Adaptive_Querying(SiestaModule):
             return
 
         # L1 promotion is already synchronous on first touch; nothing to do here.
-        # L2 promotion can fire here if pos queries cross threshold.
-        if (references_pos
-            and stats.level == PerspectiveLevel.L1_POS_FREE
-            and retention.should_promote_l2(stats)):
-            try:
-                t0 = time.time()
-                promote_to_l2(pid, stats.grouping_keys, metadata, self.storage)
-                stats.l2_build_cost_ms = (time.time() - t0) * 1000
-                catalog.promote(pid, PerspectiveLevel.L2_POS_ESTABLISHED)
-            except Exception as exc:
-                logger.error(f"{self.name}: synchronous L2 promotion failed: {exc}")
 
         # L3 promotion of the touched pairs that pass the retention gate:
         # one batched build (one scan, one grouped extraction) and one
@@ -1663,7 +1646,6 @@ class Adaptive_Querying(SiestaModule):
                     lookback=stats.lookback, lookback_mode=stats.lookback_mode,
                     grouping_keys=stats.grouping_keys,
                     metadata=metadata, storage=self.storage,
-                    has_pos=stats.level >= PerspectiveLevel.L2_POS_ESTABLISHED,
                 )
                 for pair, ms in costs.items():
                     stats.pairs[pair].build_cost_ms = ms
@@ -1707,18 +1689,6 @@ class Adaptive_Querying(SiestaModule):
             storage_type=self.query_config.get("storage_type", "s3"),
         )
         self.metadata = self.storage.read_metadata_table(self.metadata)
-
-    @staticmethod
-    def _pattern_references_pos(pattern: str) -> bool:
-        """
-        Return True if the pattern contains any positional constraint
-        (pos=... syntax).
-
-        This is the signal that drives L2 promotion and the sort-key
-        decision.  A simple string check suffices because the parser
-        uses [pos=...] syntax exclusively.
-        """
-        return "pos=" in pattern
 
     def _get_pair_status(
         self, pid: str, act_a: str, act_b: str
