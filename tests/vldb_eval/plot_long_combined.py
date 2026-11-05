@@ -198,7 +198,7 @@ def fig_long20() -> dict:
 # TO = timeout (OOM or over 200 s).  Columns in file order.
 COMPLEX_CSV = E / "complex_case_attribute_latency.csv"
 COMPLEX_KEYS = ["siesta", "lpg", "lpg_wise", "elk", "mr"]
-COMPLEX_LABEL = {**LABEL, "lpg_wise": "Upper-bound"}
+COMPLEX_LABEL = {**LABEL, "lpg_wise": "Upper-bound (LPG)"}
 COMPLEX_LENGTHS = list(range(11, 21))
 COMPLEX_TIMEOUT_S = 200.0
 COMPLEX_DS = {     # dataset: (colour, marker)
@@ -271,7 +271,7 @@ def fig_complex_by_dataset(name: str = "s2_complex_attr_latency_by_dataset") -> 
         axes = cells[:len(dss)]
         for ax, ds in zip(axes, dss):
             for k in COMPLEX_KEYS:
-                draw(ax, stats[ds][k], color[k], "o", "-", rows.get(k))
+                draw(ax, stats[ds][k], color[k], "o", ":" if k == "lpg_wise" else "-", rows.get(k))
             ax.set_title(ds, fontsize=9.5, pad=3)
         finish_axes(axes, rows, COMPLEX_LENGTHS[0], COMPLEX_LENGTHS[-1], 3, timeout=COMPLEX_TIMEOUT_S)
         axes[0].texts[-1].remove()          # the timeout label goes in the legend instead
@@ -287,9 +287,12 @@ def fig_complex_by_dataset(name: str = "s2_complex_attr_latency_by_dataset") -> 
         legend_ax = cells[len(dss)]
         legend_ax.axis("off")
         handles = [Line2D([], [], color=color[k], linewidth=1.6, marker="o", markersize=4, label=COMPLEX_LABEL[k])
-                   for k in COMPLEX_KEYS]
+                   for k in COMPLEX_KEYS if k != "lpg_wise"]
         handles.append(Line2D([], [], color=TEXT2, linewidth=0.8, linestyle="--",
                               label=f"timeout ({COMPLEX_TIMEOUT_S:g} s)"))
+        # the hand-tuned reference last, dotted
+        handles.append(Line2D([], [], color=color["lpg_wise"], linewidth=1.6, linestyle=":", marker="o",
+                              markersize=4, label=COMPLEX_LABEL["lpg_wise"]))
         legend_ax.legend(handles=handles, loc="center", fontsize=8, frameon=False, handlelength=2.2,
                          labelspacing=0.3)
         fig.tight_layout(pad=0.3, h_pad=0.5, w_pad=0.6)

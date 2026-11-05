@@ -638,10 +638,10 @@ def fig_pair_sweep_all(sweeps: list, figs: Path) -> None:
 
 def fig_pair_sweep_single(sweeps: list, figs: Path) -> None:
     """
-    All datasets in one panel (paper style): mean per-batch ingest relative to SIESTA-ALL
-    (the same means as the panels, each divided by its dataset's SIESTA-ALL mean), against
+    All datasets in one panel (paper style): mean per-batch ingest relative to Brute-force
+    (the same means as the panels, each divided by its dataset's Brute-force mean), against
     the number of maintained pairs.  Line: SIESTA-MP with n pinned pairs; star: SIESTA-MP
-    with its workload-driven pairs (at the number it kept PERSISTENT); dashed: SIESTA-ALL.
+    with its workload-driven pairs (at the number it kept PERSISTENT); dashed: Brute-force.
     """
     sweeps = [x for x in sweeps if x[1] and x[0] != "synthetic"]     # real logs only
     if not sweeps:
@@ -660,7 +660,7 @@ def fig_pair_sweep_single(sweeps: list, figs: Path) -> None:
         ax.set_xscale("log")
         ax.set_ylim(bottom=0)
         ax.set_xlabel("Maintained pairs (all perspectives)")
-        ax.set_ylabel("Mean per-batch ingest time\nrelative to SIESTA-ALL")
+        ax.set_ylabel("Mean per-batch ingest time\nrelative to Brute-force")
         handles = [matplotlib.lines.Line2D([], [], color=DS_COLOR[ds], marker=DS_MARKER[ds],
                                            markerfacecolor=SURFACE, label=f"{LABEL.get(ds, ds)} (P = {P})")
                    for ds, _, _, _, P, _ in sweeps]
@@ -669,7 +669,7 @@ def fig_pair_sweep_single(sweeps: list, figs: Path) -> None:
                                     label="SIESTA-MP, n pinned pairs"),
             matplotlib.lines.Line2D([], [], color=TEXT2, marker="*", markersize=10, linestyle="none",
                                     label="SIESTA-MP, workload-driven"),
-            matplotlib.lines.Line2D([], [], color=TEXT, linestyle="--", label="SIESTA-ALL (= 1)"),
+            matplotlib.lines.Line2D([], [], color=TEXT, linestyle="--", label="Brute-force (= 1)"),
         ]
         fig.tight_layout(rect=(0, 0, 1, 0.80), pad=0.3)
         fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=2, fontsize=8,

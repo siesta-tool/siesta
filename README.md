@@ -110,11 +110,14 @@ module-oriented CLI jobs, and provides two indexing variants:
 - **SIESTA (classical, case-centric)** — the original SIESTA. Every ingest batch eagerly builds and
   maintains an inverted index over *every* ordered activity pair of a single, predetermined grouping
   (the case id). Modules: `index` (ingestion) and `query` (detection, exploration, statistics).
+  ![Siesta Architecture](siesta-architecture.png)
+
 - **SIESTA-MP (adaptive, multiperspective)** — the generalized SIESTA. Events are
   ingested once into a shared base layer; activity-pair indices are materialised per *grouping
   perspective* (any attribute-derived grouping, e.g. `org:resource`) and only for the pairs that the
   query workload demands, under a cost-based retention lifecycle. Modules: `adaptive_index` and
   `adaptive_query`.
+  ![Siesta-MP Architecture](siesta-mp-architecture.svg)
 
 Indexing every pair of every perspective eagerly (one SIESTA run per perspective) is referred to as
 *Brute-force* in the paper. In both variants each pair record embeds the attribute vectors of both
@@ -126,7 +129,7 @@ Core data assumptions:
 - `activity` is a string
 - `position` inside a trace (or group) is a 0-indexed integer, derived from the timestamp order
 
-![Siesta Framework Architecture](siesta-architecture.png)
+
 
 ### Query language
 

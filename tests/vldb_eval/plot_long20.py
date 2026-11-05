@@ -6,7 +6,7 @@ perspectives case / Action / org:resource; SIESTA vs ELK (EQL) vs LPG (Kuzu)).
 Reads results/exp4_patterns/{siesta,eql,lpg}/long20/; writes
   results/figures/s2_long20_outcomes.pdf   outcome of every query, per system
   results/figures/s2_long20_latency.pdf    median latency vs length (Action, org:resource),
-      SIESTA-MP / Upper-bound (LPG step-by-step) / ELK, failed medians above the 200 s timeout
+      SIESTA-MP / ELK / Upper-bound (LPG step-by-step Cypher, dotted), failed medians above the 200 s timeout
   results/tables/s2_long20_summary.json    the numbers quoted in the report
   results/figures/s2_long20_main_outcomes.pdf, s2_long20_main_latency.pdf
       the main comparison: SIESTA vs the native LPG (plain Cypher) and ELK
@@ -214,7 +214,7 @@ def fig_latency() -> dict:
                 by_len.setdefault(persp, {})[key] = {str(L): {"median_s": statistics.median(g[L]), "n": len(g[L])}
                                                      for L in sorted(g)}
     keys = ["siesta", "lpg_oracle", "elk"]
-    label = {**lc.LABEL, "lpg_oracle": "Upper-bound"}
+    label = {**lc.LABEL, "lpg_oracle": "Upper-bound (LPG)"}
     persps = [(persp, pf) for persp, pf in PERSPS if persp != "case"]
     stats = {persp: {k: lc.medians([lc.LONG20_FILES[k].format(p=pf)]) for k in keys} for persp, pf in persps}
     for persp, _ in persps:          # a length EQL cannot express at all (org:resource L17): drawn as timeout
@@ -227,7 +227,7 @@ def fig_latency() -> dict:
         fig, axes = plt.subplots(len(persps), 1, figsize=(4.2, 3.6), sharex=True, sharey=True)
         for ax, (persp, _) in zip(axes, persps):
             for k in keys:
-                lc.draw(ax, stats[persp][k], lc.COLOR[k], "o", "-", rows.get(k))
+                lc.draw(ax, stats[persp][k], lc.COLOR[k], "o", ":" if k == "lpg_oracle" else "-", rows.get(k))
             ax.set_title(persp, fontsize=9.5, pad=3)
         lc.finish_axes(list(axes), rows, 10, 20, 2, timeout=TIMEOUT_S)
         axes[0].texts[-1].remove()          # the timeout label goes in the legend instead
@@ -238,9 +238,12 @@ def fig_latency() -> dict:
             ax.set_ylim(min(lows) * 0.6, ax.get_ylim()[1] * 1.25)    # headroom over the failed band
         fig.supylabel("Median latency (s)", fontsize=9.5)
         handles = [Line2D([], [], color=lc.COLOR[k], linewidth=1.6, marker="o", markersize=4, label=label[k])
-                   for k in keys]
+                   for k in keys if k != "lpg_oracle"]
         handles.append(Line2D([], [], color=lc.TEXT2, linewidth=0.8, linestyle="--",
                               label=f"timeout ({TIMEOUT_S:g} s)"))
+        # the hand-tuned reference last, dotted
+        handles.append(Line2D([], [], color=lc.COLOR["lpg_oracle"], linewidth=1.6, linestyle=":", marker="o",
+                              markersize=4, label=label["lpg_oracle"]))
         fig.tight_layout(rect=(0, 0, 1, 0.92), pad=0.3, h_pad=0.5)
         fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 1.0), ncol=len(handles),
                    fontsize=8, frameon=False, columnspacing=1.0, handlelength=2.0, handletextpad=0.4,
