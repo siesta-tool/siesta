@@ -7,7 +7,7 @@ from typing import IO, Any, Dict
 
 import pandas as pd
 
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?$")
 DIGIT_RE = re.compile(r"\d")
 DATE_GROUPINGS = ("dow", "month", "quarter", "year", "hour", "date", "none")
 SEPARATOR = "§"
@@ -18,7 +18,7 @@ COUNTRY_LIST = Path(__file__).with_name("countries.txt")
 RULES:
 100% - skip
 >5% distinct - filled/unfilled
-dates - Bucket + unfilled
+dates - dropped (or bucketed via date_grouping)
 numeric - Bucket + unfilled
 <5% distinct - keep
 """
@@ -81,7 +81,7 @@ def run_form_analysis(
     *,
     header_row: int = 1,
     sheet_name: str | int = 0,
-    date_grouping: str = "dow",
+    date_grouping: str = "none",
     numeric_bins: int = 5,
     retain_threshold: float = 0.05,
     drop_constant: bool = True,
@@ -109,7 +109,7 @@ def run_form_analysis(
 
     for col in df.columns:
         if _looks_like_dates(df[col]):
-            df[col] = pd.to_datetime(df[col])
+            df[col] = pd.to_datetime(df[col], format="ISO8601")
 
         distinct = df[col].nunique(dropna=False)
 
