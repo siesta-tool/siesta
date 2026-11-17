@@ -11,6 +11,8 @@ services:
       dockerfile: siesta/dockerbase/API/API.dockerfile
     init: true
     working_dir: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - SIESTA_PROJECT_ROOT=/workspace
       - SIESTA_CONFIG=${SIESTA_CONFIG:-/workspace/config/siesta.docker.config.json}
@@ -21,6 +23,12 @@ services:
       - SPARK_USER=spark
       - MPLCONFIGDIR=/tmp/matplotlib
       - SPARK_IVY_DIR=/tmp/.ivy2
+      # Fundinfo pipeline. It indexes and mines through this same API, and reaches
+      # Ollama on the host, which must listen beyond 127.0.0.1.
+      - SIESTA_API=http://localhost:8000
+      - SIESTA_LOG_NAME=${SIESTA_LOG_NAME:-fundinfo_pipeline}
+      - LLM_URL=${LLM_URL:-http://host.docker.internal:11434/v1}
+      - LLM_MODEL=${LLM_MODEL:-gemma4:e4b}
       # Optional distributed-execution tuning (see sparkManager.py). Commented out so
       # local/non-distributed runs are unaffected; values below are copied from
       # docker-compose-com.yml and are sized for that cluster's hardware, so adjust

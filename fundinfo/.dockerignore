@@ -1,0 +1,7 @@
+.git
+.venv
+output
+tests
+**/__pycache__
+*.html
+*.xlsx

@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fundinfo Report &mdash; __SRC__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+:root{
+  --bg:#f7f8fb;--surface:#fff;--surface2:#f0f2f6;
+  --bd:rgba(0,0,0,.07);--bd-em:rgba(0,0,0,.13);
+  --text:#111827;--text-sub:#4b5563;--text-muted:#9ca3af;
+  --accent:#1d9e75;--accent-bg:rgba(29,158,117,.10);
+  --pill-bg:#e8eaf0;--pill-txt:#4b5563;
+  --font:'Inter',system-ui,sans-serif;
+  --mono:'JetBrains Mono','Consolas',monospace;
+  --r:8px
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --bg:#090d16;--surface:#111827;--surface2:#1a2235;
+    --bd:rgba(255,255,255,.07);--bd-em:rgba(255,255,255,.13);
+    --text:#e2e8f0;--text-sub:#94a3b8;--text-muted:#4a5568;
+    --accent:#1d9e75;--accent-bg:rgba(29,158,117,.15);
+    --pill-bg:#1a2235;--pill-txt:#7f9ab8
+  }
+}
+
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14px;line-height:1.5}
+
+/* ── header ─────────────────────────────────────────────────────── */
+header{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px 24px;border-bottom:1px solid var(--bd-em);background:var(--surface)}
+h1{margin:0;font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--accent)}
+.sub{color:var(--text-muted);font-size:13px;margin-top:5px}
+button{background:var(--accent);color:#fff;border:0;border-radius:var(--r);padding:8px 14px;font-size:13px;font-family:var(--font);cursor:pointer;transition:opacity .15s}
+button:hover{opacity:.9}
+
+:root{--bad:#dc2626;--bad-rgb:220,38,38;--anom:#b45309;--anom-rgb:245,140,10;--ante:#2563eb;--grid:rgba(0,0,0,.09);--frozen:#eef0f5}
+@media(prefers-color-scheme:dark){:root{--bad:#f87171;--bad-rgb:239,68,68;--anom:#fb923c;--anom-rgb:250,150,40;--ante:#60a5fa;--grid:rgba(255,255,255,.08);--frozen:#161e2e}}
+html,body{height:100%}
+body{display:flex;flex-direction:column;overflow:hidden}
+.sw{display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid var(--grid);flex:none}
+.sw.ramp{width:32px;background:linear-gradient(90deg,rgba(var(--anom-rgb),.2),rgba(var(--anom-rgb),.7))}
+.seg{display:inline-flex;flex:none;border:1px solid var(--bd-em);border-radius:var(--r);overflow:hidden}
+.seg button{border-radius:0;background:var(--surface);color:var(--text-sub);padding:6px 10px;white-space:nowrap}
+.seg button.on{background:var(--accent);color:#fff}
+
+/* ── legend and cell lists ──────────────────────────────────────── */
+.legend-bar{padding:8px 24px;background:var(--surface2);border-bottom:1px solid var(--bd-em)}
+.legend{display:flex;flex-wrap:wrap;gap:8px}
+.lg{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;background:var(--surface);color:var(--text-sub);border:1px solid var(--bd-em);font-size:12.5px}
+.lg:hover{border-color:var(--accent);opacity:1}
+.lg.on{border-color:var(--accent);color:var(--text)}
+.lg b{font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.lg .hint{color:var(--text-muted);font-size:11px}
+.lg .chev{font-size:10px;color:var(--text-muted);transition:transform .15s}
+.lg.on .chev{transform:rotate(90deg)}
+#cells{display:flex;flex-wrap:wrap;gap:4px;max-height:132px;overflow:auto;margin-top:8px}
+#cells .none{color:var(--text-muted);font-size:12px}
+.go{display:inline-flex;align-items:center;gap:6px;max-width:260px;padding:3px 8px;background:var(--surface);color:var(--text-sub);border:1px solid var(--bd);border-radius:6px;font-size:11.5px}
+.go:hover{border-color:var(--accent);opacity:1}
+.go.on{border-color:var(--bad);color:var(--text)}
+.go .a{font-family:var(--mono);font-weight:500;color:var(--text)}
+.go .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.go .n{font-family:var(--mono);color:var(--anom)}
+
+/* ── sheet ──────────────────────────────────────────────────────── */
+#sheet{position:relative;flex:1;min-height:240px;background:var(--surface);font-size:12px}
+#corner,#top,#left,#vp{position:absolute;overflow:hidden}
+#corner{left:0;top:0;z-index:4;background:var(--frozen)}
+#top{top:0;right:0;z-index:3;background:var(--frozen)}
+#left{left:0;bottom:0;z-index:3;background:var(--surface)}
+#vp{right:0;bottom:0;overflow:auto}
+#canvas,#topIn,#leftIn{position:absolute;left:0;top:0}
+.c,.h{position:absolute;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-right:1px solid var(--grid);border-bottom:1px solid var(--grid);padding:0 6px}
+.h{background:var(--frozen);color:var(--text-sub);font-size:11px}
+.h.letter{text-align:center;color:var(--text-muted);font-family:var(--mono);font-size:10px}
+.h.code{font-family:var(--mono);font-size:10px;color:var(--text-muted)}
+.h.head{white-space:normal;line-height:1.25;padding-top:3px;font-weight:600;color:var(--text)}
+.h.rn{text-align:right;font-family:var(--mono);font-size:10.5px;color:var(--text-muted)}
+.h.rn.hit{color:var(--anom);font-weight:600}
+.h.letter.hit{color:var(--anom);font-weight:600}
+.c.frz{background:var(--surface);font-family:var(--mono);font-size:11px;border-right:2px solid var(--bd-em)}
+.c.f{cursor:pointer;color:var(--text)}
+.c.f .ghost{color:var(--anom);font-style:italic;opacity:.85}
+.c.ante{box-shadow:inset 0 0 0 2px var(--ante)}
+.c.sel{box-shadow:inset 0 0 0 2px var(--bad)}
+.empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--text-muted)}
+
+/* ── tooltip ────────────────────────────────────────────────────── */
+#tip{position:fixed;z-index:50;display:none;max-width:620px;max-height:60vh;overflow:auto;background:var(--surface);border:1px solid var(--bd-em);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:12px 14px;font-size:12.5px;line-height:1.45}
+#tip.pinned{border-color:var(--bad)}
+#tip .addr{font-family:var(--mono);font-weight:600;color:var(--bad)}
+#tip .ttl{font-weight:600;margin-left:6px}
+#tip .kv{margin-top:6px;color:var(--text-sub)}
+#tip .kv b{color:var(--text);font-weight:500}
+#tip .note{margin-top:4px;color:var(--text-muted);font-size:11.5px}
+#tip .err{margin-top:4px;color:var(--text);font-size:12px}
+#tip .expl{margin-top:2px;color:var(--text-sub);font-size:12px}
+#tip table{border-collapse:collapse;margin-top:8px;width:100%}
+#tip th{position:static;background:none;cursor:default;text-align:left;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:4px 6px;border-bottom:1px solid var(--bd-em)}
+#tip td{padding:4px 6px;border-bottom:1px solid var(--bd);vertical-align:top}
+#tip td.n{font-family:var(--mono);font-size:11px;white-space:nowrap}
+#tip .exp{color:var(--accent);font-weight:500}
+#tip .ref{font-family:var(--mono);font-size:10.5px;color:var(--ante);cursor:pointer;text-decoration:underline dotted}
+#tip .x{float:right;background:none;color:var(--text-muted);padding:0 4px;font-size:16px;line-height:1}
+#tip .more{margin-top:6px;color:var(--text-muted);font-size:11.5px}
+.c.f.okd{background:repeating-linear-gradient(135deg,var(--accent-bg) 0 5px,transparent 5px 10px);color:var(--text-sub)}
+.c.f.okd .ghost{color:var(--text-muted)}
+.sw.okd{background:repeating-linear-gradient(135deg,var(--accent-bg) 0 3px,var(--surface) 3px 6px)}
+#tip .rl{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.05em;padding:1px 6px;border-radius:4px}
+#tip .rl.anom{background:rgba(var(--anom-rgb),.2);color:var(--anom)}
+#tip .rl.okr{background:var(--accent-bg);color:var(--accent)}
+#tip tr.has-why td{border-bottom:0}
+#tip tr.why td{padding-top:0;color:var(--text-sub);font-size:11.5px}
+.c.f.exy,.sw.exy{background:#f87171;color:#111827}
+.c.f.exo,.sw.exo{background:#b91c1c;color:#fff}
+.c.f.exy .ghost{color:#7f1d1d}
+.c.f.exo .ghost{color:#fff}
+.c.f.unc,.sw.unc{background:repeating-linear-gradient(135deg,rgba(100,116,139,.22) 0 3px,transparent 3px 6px)}
+.h.code.gap{color:#b45309;text-decoration:underline dotted;cursor:help}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Fundinfo Report</h1>
+    <div class="sub">Source: __SRC__ &middot; orange cells hold a value (or nothing) where an active coexistence rule expects something else; red cells fail fundinfo validation; green-hatched cells were cleared by the agent; grey-hatched cells could not be validated; hover for the details, click to pin, blue outlines mark the cells that triggered a rule</div>
+  </div>
+  <div class="seg"><button type="button" id="vCompact" class="on">Flagged rows &amp; cols</button><button type="button" id="vFull">Full sheet</button></div>
+</header>
+<div class="legend-bar">
+  <div class="legend">
+    <button type="button" class="lg" data-list="rules"><span class="chev">&#9656;</span><span class="sw ramp"></span>Rules per cell <span class="hint">1 &rarr; 16+</span><b id="nRules">0</b></button>
+    <button type="button" class="lg" data-list="exy"><span class="chev">&#9656;</span><span class="sw exy"></span>Validation<b id="nExy">0</b></button>
+    <button type="button" class="lg" data-list="exo"><span class="chev">&#9656;</span><span class="sw exo"></span>Validation + anomaly<b id="nExo">0</b></button>
+  </div>
+  <div id="cells" hidden></div>
+</div>
+<div id="sheet">
+  <div id="corner"></div>
+  <div id="top"><div id="topIn"></div></div>
+  <div id="left"><div id="leftIn"></div></div>
+  <div id="vp"><div id="canvas"></div></div>
+</div>
+<div id="tip"></div>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+const D=JSON.parse(document.getElementById('data').textContent);
+const NR=D.n_rows, NC=D.n_cols, OFF=D.row_offset, W=D.widths, VALS=D.vals;
+const LAB=D.labels, LCOL=D.label_col, LOGV=D.log_vals, RULES=D.rules, VIO=D.viol;
+
+// agent rulings, one [verdict, reasoning] pair per violation; VIO offset i maps to pair i/4
+// verdict is 0 for OK, 1 for anomaly, 2 for not reviewed; cells not reviewed stay red
+const RUL=D.ruling, RUL_TXT=D.ruling_texts||[], HAS_AG=!!RUL;
+const EXPR=new Map(D.expr||[]), UNC=new Map(D.unchk||[]), UNC_TXT=D.unchk_texts||[], GAP=D.col_gaps||{};
+const verdict=i=>RUL[(i>>2)*2];
+const anomalous=i=>verdict(i)!==0;
+const reasoning=i=>RUL_TXT[RUL[(i>>2)*2+1]]||'';
+const RL=['okr">OK','anom">ANOMALY','">NOT REVIEWED'];
+const G=(()=>{const b=atob(D.grid);const u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return new Uint16Array(u.buffer);})();
+const RH=22, LETTER_H=18, CODE_H=18, HEAD_H=42, TOP_H=LETTER_H+CODE_H+HEAD_H, RN_W=48, A_W=W[0];
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const cellText=(r,c)=>{const v=G[r*NC+c];return v?VALS[v-1]:'';};
+function colName(c){let s='';c++;while(c>0){const m=(c-1)%26;s=String.fromCharCode(65+m)+s;c=Math.floor((c-1)/26);}return s;}
+const addr=(r,c)=>colName(c)+(r+OFF);
+const LAB_RULE=LAB.map(s=>s.split('§')[0].trim()), LAB_VAL=LAB.map(s=>{const i=s.indexOf('§');return i<0?'':s.slice(i+1).trim();});
+function missingLabel(i){const r=RULES[VIO[i+1]];return VIO[i+2]===0?r[2]:r[1];}
+function heldLabel(i){const r=RULES[VIO[i+1]];return VIO[i+2]===0?r[1]:r[2];}
+
+// ── flagged cells ───────────────────────────────────────────────────
+// flagged: cell key (row*NC+col) -> violation offsets into VIO
+
+const flagged=new Map(), hitRows=new Set(), hitCols=new Set(), anteCols=new Set();
+for(let i=0;i<VIO.length;i+=4){
+  const c=LCOL[missingLabel(i)];
+  if(c<0) continue;
+  const k=VIO[i]*NC+c;
+  let a=flagged.get(k); if(!a){a=[];flagged.set(k,a);} a.push(i);
+  hitRows.add(VIO[i]); hitCols.add(c);
+  const hc=LCOL[heldLabel(i)]; if(hc>=0) anteCols.add(hc);
+}
+for(const k of EXPR.keys()){hitRows.add(Math.floor(k/NC));hitCols.add(k%NC);}
+
+// Anomalous violations per cell; a cell with none is agent-cleared.
+const ANOM=new Map([...flagged].map(([k,a])=>[k,HAS_AG?a.filter(anomalous).length:a.length]));
+const anomN=k=>ANOM.get(k)||0;
+
+let R=[], C=[], colX=[], mode='compact';
+let hoverKey=-1, selKey=-1, pinned=false, ante=new Set();
+
+function arrange(){
+  if(mode==='compact'){
+    R=[...hitRows].sort((a,b)=>a-b);
+    C=[...new Set([...hitCols,...anteCols])].filter(c=>c!==0).sort((a,b)=>a-b);
+  } else {
+    R=Array.from({length:NR},(_,i)=>i);
+    C=Array.from({length:NC-1},(_,i)=>i+1);
+  }
+  colX=[0]; for(const c of C) colX.push(colX[colX.length-1]+W[c]);
+  layout(); render();
+}
+
+// ── legend lists ────────────────────────────────────────────────────
+// Each list holds the cells drawn in its legend colour. Keys sort row by row.
+
+const LISTS={
+  rules:[...flagged.keys()].filter(k=>!EXPR.has(k)&&anomN(k)>0).sort((a,b)=>anomN(b)-anomN(a)||a-b),
+  exy:[...EXPR.keys()].filter(k=>!anomN(k)).sort((a,b)=>a-b),
+  exo:[...EXPR.keys()].filter(k=>anomN(k)>0).sort((a,b)=>a-b),
+};
+$('nRules').textContent=LISTS.rules.length.toLocaleString();
+$('nExy').textContent=LISTS.exy.length.toLocaleString();
+$('nExo').textContent=LISTS.exo.length.toLocaleString();
+
+const cellsBox=$('cells');
+let openList='';
+function goHTML(k){
+  const r=Math.floor(k/NC), c=k%NC, head=D.heads[c]||D.codes[c]||'';
+  return `<button type="button" class="go${k===selKey?' on':''}" data-k="${k}" title="${esc(head)}">`+
+    `<span class="a">${addr(r,c)}</span><span class="t">${esc(head)}</span>`+
+    (openList==='rules'?`<span class="n">${anomN(k)}</span>`:'')+'</button>';
+}
+for(const b of document.querySelectorAll('.lg')) b.addEventListener('click',()=>{
+  openList=openList===b.dataset.list?'':b.dataset.list;
+  for(const x of document.querySelectorAll('.lg')) x.classList.toggle('on',x.dataset.list===openList);
+  const keys=LISTS[openList]||[];
+  cellsBox.hidden=!openList;
+  cellsBox.innerHTML=keys.length?keys.map(goHTML).join(''):'<span class="none">No cells.</span>';
+  schedule();
+});
+cellsBox.addEventListener('click',e=>{
+  const b=e.target.closest('.go');
+  if(!b) return;
+  cellsBox.querySelector('.go.on')?.classList.remove('on');
+  b.classList.add('on');
+  reveal(parseInt(b.dataset.k));
+});
+
+// ── grid ────────────────────────────────────────────────────────────
+const sheet=$('sheet'), vp=$('vp'), canvas=$('canvas'), topIn=$('topIn'), leftIn=$('leftIn');
+function layout(){
+  const fw=RN_W+A_W;
+  $('corner').style.cssText=`width:${fw}px;height:${TOP_H}px`;
+  $('top').style.cssText=`left:${fw}px;height:${TOP_H}px`;
+  $('left').style.cssText=`top:${TOP_H}px;width:${fw}px`;
+  vp.style.cssText=`left:${fw}px;top:${TOP_H}px`;
+  canvas.style.width=colX[colX.length-1]+'px';
+  canvas.style.height=R.length*RH+'px';
+  // the frozen corner shows column A's letter, code and header
+  $('corner').innerHTML=hcell('letter',RN_W,0,A_W,LETTER_H,'A')+hcell('code',RN_W,LETTER_H,A_W,CODE_H,D.codes[0]||'')+
+    hcell('head',RN_W,LETTER_H+CODE_H,A_W,HEAD_H,D.heads[0]||'')+
+    hcell('rn',0,0,RN_W,LETTER_H,'')+hcell('rn',0,LETTER_H,RN_W,CODE_H,'1')+hcell('rn',0,LETTER_H+CODE_H,RN_W,HEAD_H,'2');
+  sheet.querySelector('.empty')?.remove();
+  if(!R.length){const e=document.createElement('div');e.className='empty';e.textContent='No flagged cells.';sheet.appendChild(e);}
+}
+function hcell(cls,x,y,w,h,text,title){
+  return `<div class="h ${cls}" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px;line-height:${cls==='head'?'1.25':h+'px'}"${title?` title="${esc(title)}"`:''}>${esc(text)}</div>`;
+}
+function shade(n){return `rgba(var(--anom-rgb),${(0.2+0.5*Math.min(1,(n-1)/15)).toFixed(3)})`;}
+function cellHTML(r,c,x,y,w,frozen){
+  const k=r*NC+c, a=flagged.get(k), t=cellText(r,c);
+  let cls='c'+(frozen?' frz':''), st=`left:${x}px;top:${y}px;width:${w}px;height:${RH}px;line-height:${RH}px`, body=esc(t);
+  if(a){
+    // with rulings, a cell stays red while any of its violations is ruled an anomaly
+    const n=HAS_AG?a.filter(anomalous).length:a.length;
+    cls+=' f'+(n?'':' okd'); if(n) st+=`;background:${shade(n)}`;
+    if(t==='') body=`<span class="ghost">&#8709; &rarr; ${esc(LAB_VAL[missingLabel(a[0])])}</span>`;
+  }
+  if(EXPR.has(k)){cls=cls.replace(' okd','')+(a?'':' f')+(a&&a.some(anomalous)?' exo':' exy');st=st.replace(/;background:[^;]*/,'');}
+  else if(UNC.has(k)&&!a) cls+=' f unc';
+  if(ante.has(k)) cls+=' ante';
+  if(k===selKey) cls+=' sel';
+  return `<div class="${cls}" style="${st}" data-k="${k}">${body}</div>`;
+}
+function firstCol(x){let lo=0,hi=C.length;while(lo<hi){const m=(lo+hi)>>1;if(colX[m+1]<=x)lo=m+1;else hi=m;}return lo;}
+let raf=0;
+function render(){
+  raf=0;
+  const st=vp.scrollTop, sl=vp.scrollLeft, h=vp.clientHeight, w=vp.clientWidth;
+  const r0=Math.max(0,Math.floor(st/RH)-2), r1=Math.min(R.length,Math.ceil((st+h)/RH)+2);
+  const c0=Math.max(0,firstCol(sl)-1), c1=Math.min(C.length,firstCol(sl+w)+2);
+  const rowsF=new Set(), colsF=new Set();
+  for(const k of flagged.keys()){rowsF.add(Math.floor(k/NC));colsF.add(k%NC);}
+  let g='', t='', l='';
+  for(let ri=r0;ri<r1;ri++){
+    const r=R[ri], y=ri*RH;
+    for(let ci=c0;ci<c1;ci++) g+=cellHTML(r,C[ci],colX[ci],y,W[C[ci]],false);
+    l+=`<div class="h rn${rowsF.has(r)?' hit':''}" style="left:0;top:${y}px;width:${RN_W}px;height:${RH}px;line-height:${RH}px">${r+OFF}</div>`;
+    l+=cellHTML(r,0,RN_W,y,A_W,true);
+  }
+  for(let ci=c0;ci<c1;ci++){
+    const c=C[ci], x=colX[ci], w2=W[c];
+    t+=hcell('letter'+(colsF.has(c)?' hit':''),x,0,w2,LETTER_H,colName(c))+hcell('code'+(GAP[c]?' gap':''),x,LETTER_H,w2,CODE_H,D.codes[c]||'',GAP[c]&&'Validation gaps:\n'+GAP[c].join('\n'))+
+       hcell('head',x,LETTER_H+CODE_H,w2,HEAD_H,D.heads[c]||'',D.heads[c]||'');
+  }
+  canvas.innerHTML=g; topIn.innerHTML=t; leftIn.innerHTML=l;
+  topIn.style.transform=`translateX(${-sl}px)`;
+  leftIn.style.transform=`translateY(${-st}px)`;
+}
+const schedule=()=>{if(!raf)raf=requestAnimationFrame(render);};
+vp.addEventListener('scroll',()=>{schedule(); if(!pinned) hideTip();});
+window.addEventListener('resize',schedule);
+// wheel over the frozen panes scrolls the grid, as in a spreadsheet
+for(const id of ['left','top']) $(id).addEventListener('wheel',e=>{vp.scrollTop+=e.deltaY;vp.scrollLeft+=e.deltaX;e.preventDefault();},{passive:false});
+
+// ── tooltip ─────────────────────────────────────────────────────────
+const tip=$('tip');
+function anteFor(k){
+  const s=new Set(), r=Math.floor(k/NC);
+  for(const i of flagged.get(k)||[]){const hc=LCOL[heldLabel(i)]; if(hc>=0) s.add(r*NC+hc);}
+  return s;
+}
+function exprHTML(k){
+  const m=EXPR.get(k);
+  const u=UNC.get(k);
+  return (m?'<div class="kv"><b>Fails validation:</b></div>'+m.map(([s,x])=>`<div class="err">${esc(s)}</div>`+(x?`<div class="expl">Explanation: ${esc(x)}</div>`:'')).join(''):'')+
+    (u?'<div class="kv"><b>Not validated:</b></div>'+u.map(i=>`<div class="note">${esc(UNC_TXT[i])}</div>`).join(''):'');
+}
+
+// Address, field name, ISIN, then the value with what the mined rules expect, if anything.
+
+function tipHead(k,expected){
+  const r=Math.floor(k/NC), c=k%NC, t=cellText(r,c);
+  return (pinned?'<button type="button" class="x" id="tipX">&times;</button>':'')+
+    `<span class="addr">${addr(r,c)}</span><span class="ttl">${esc(D.heads[c]||'')}</span>`+
+    `<div class="kv">ISIN <b>${esc(cellText(r,0))}</b></div>`+
+    `<div class="kv">Value: <b>${t===''?'<i>empty</i>':esc(t)}</b>${expected?` (Expected: ${expected})`:''}</div>`;
+}
+function tipHTML(k){
+  if(!flagged.has(k)) return tipHead(k,'')+exprHTML(k);
+  const r=Math.floor(k/NC), c=k%NC, a=[...flagged.get(k)].sort((x,y)=>(HAS_AG?anomalous(y)-anomalous(x):0)||RULES[VIO[y+1]][4]-RULES[VIO[x+1]][4]);
+  const t=cellText(r,c), act=VIO[a[0]+3];
+  const exp=new Map(); for(const i of a){const v=LAB_VAL[missingLabel(i)];exp.set(v,(exp.get(v)||0)+1);}
+  let h=tipHead(k,[...exp].map(([v,n])=>`<span class="exp">${esc(v)}</span>, ${n} rule${n>1?'s':''}`).join('; '));
+  if(act<0 && t!=='') h+='<div class="note">Preprocessing dropped this cell, so the log treats it as absent.</div>';
+  else if(act>=0 && LOGV[act]!==t) h+=`<div class="note">Log value after preprocessing: ${esc(LOGV[act])}</div>`;
+  h+=exprHTML(k);
+  if(HAS_AG) h+=`<div class="kv">Agent: <span class="rl ${RL[verdict(a[0])]}</span></div><div class="note">${esc(reasoning(a[0]))}</div>`;
+  const cap=pinned?a.length:12;
+  h+='<div class="kv"><b>Association rules:</b></div>';
+  h+='<table><thead><tr><th>Because</th><th>Expects</th><th>Sup</th><th>Conf</th><th>Int</th>'+'</tr></thead><tbody>';
+  for(const i of a.slice(0,cap)){
+    const ru=RULES[VIO[i+1]], held=heldLabel(i), miss=missingLabel(i), hc=LCOL[held];
+    h+=`<tr><td>${hc>=0?`<span class="ref" data-k="${r*NC+hc}" title="Scroll to this cell">${addr(r,hc)}</span> `:''}${esc(LAB_RULE[held])} = <b>${esc(LAB_VAL[held])}</b></td>`+
+      `<td><span class="exp">${esc(LAB_VAL[miss])}</span></td>`+
+      `<td class="n">${ru[3].toFixed(3)}</td><td class="n">${ru[4].toFixed(3)}</td><td class="n">${ru[5].toFixed(3)}</td>`+
+      '</tr>';
+  }
+  h+='</tbody></table>';
+  if(a.length>cap) h+=`<div class="more">+${a.length-cap} more &middot; click the cell to pin and see all</div>`;
+  return h;
+}
+function placeTip(x,y){
+  const m=12, w=tip.offsetWidth, h=tip.offsetHeight;
+  let left=x+m, top=y+m;
+  if(left+w>innerWidth-8) left=Math.max(8,x-w-m);
+  if(top+h>innerHeight-8) top=Math.max(8,innerHeight-h-8);
+  tip.style.left=left+'px'; tip.style.top=top+'px';
+}
+function showTip(k,x,y){
+  tip.innerHTML=tipHTML(k); tip.style.display='block'; tip.classList.toggle('pinned',pinned);
+  placeTip(x,y);
+  $('tipX')?.addEventListener('click',unpin);
+}
+function hideTip(){tip.style.display='none';}
+function setAnte(k){ante=k>=0?anteFor(k):new Set();schedule();}
+function unpin(){pinned=false;selKey=-1;hideTip();setAnte(-1);cellsBox.querySelector('.go.on')?.classList.remove('on');}
+sheet.addEventListener('mouseover',e=>{
+  if(pinned) return;
+  const el=e.target.closest('.c.f');
+  const k=el?parseInt(el.dataset.k):-1;
+  if(k===hoverKey) return;
+  hoverKey=k;
+  if(k<0){hideTip();setAnte(-1);return;}
+  showTip(k,e.clientX,e.clientY); setAnte(k);
+});
+sheet.addEventListener('mouseleave',()=>{if(!pinned){hoverKey=-1;hideTip();setAnte(-1);}});
+sheet.addEventListener('click',e=>{
+  const el=e.target.closest('.c.f');
+  if(!el){if(pinned)unpin();return;}
+  const k=parseInt(el.dataset.k), rc=el.getBoundingClientRect();
+  pinned=true; selKey=k; showTip(k,rc.right,rc.top); setAnte(k);
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&pinned)unpin();});
+
+// a trigger address in the pinned tooltip scrolls its column into view and keeps the pin
+tip.addEventListener('click',e=>{
+  const ref=e.target.closest('.ref');
+  if(!ref) return;
+  const c=parseInt(ref.dataset.k)%NC, ci=C.indexOf(c);
+  if(c!==0 && ci>=0) vp.scrollLeft=Math.max(0,colX[ci]-vp.clientWidth/3);
+  render();
+});
+
+// ── navigation ──────────────────────────────────────────────────────
+function reveal(k){
+  const r=Math.floor(k/NC), c=k%NC, ri=R.indexOf(r);
+  if(ri<0) return false;
+  vp.scrollTop=Math.max(0,ri*RH-vp.clientHeight/3);
+  if(c!==0){const ci=C.indexOf(c); if(ci<0) return false; vp.scrollLeft=Math.max(0,colX[ci]-vp.clientWidth/3);}
+  render();
+  const el=sheet.querySelector(`.c[data-k="${k}"]`);
+  if(el && (flagged.has(k)||EXPR.has(k)||UNC.has(k))){pinned=true;selKey=k;const rc=el.getBoundingClientRect();showTip(k,rc.right,rc.top);setAnte(k);render();}
+  else {unpin();}
+  return true;
+}
+function setMode(m){
+  mode=m; $('vCompact').classList.toggle('on',m==='compact'); $('vFull').classList.toggle('on',m==='full');
+  unpin(); vp.scrollTop=0; vp.scrollLeft=0; arrange();
+}
+$('vCompact').onclick=()=>setMode('compact');
+$('vFull').onclick=()=>setMode('full');
+arrange();
+</script>
+</body>
+</html>

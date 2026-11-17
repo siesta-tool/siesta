@@ -1,0 +1,13 @@
+{
+  "method": "rules",
+  "storage_namespace": "siesta",
+  "rules_key": null,
+  "codes": null,
+  "limit": null,
+  "workers": 4,
+  "delay": 0.25,
+  "timeout": 30,
+  "retries": 4,
+  "refresh": false,
+  "cache_dir": "output/fundinfo"
+}

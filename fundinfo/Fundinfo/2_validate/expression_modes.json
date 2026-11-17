@@ -1,0 +1,7 @@
+{
+ "IsEqual([OFST020545],\"dormant\") and IsNotEmpty([OFST020563]) and [OFST020562] < [OFST020563]": "invalid_when_true",
+ "IsEqual([OFST020545],\"active\") and IsNotEmpty([OFST020562]) and [OFST020563] <= [OFST020562]": "invalid_when_true",
+ "(IsEqual([OFST020545],\"projected\") OR IsEqual([OFST020545],\"to be launched\") OR IsEqual([OFST020545],\"offering period\")) and (IsNotEmpty([OFST020562]) or IsNotEmpty([OFST020563]))": "invalid_when_true",
+ "(IsEqual([OFST020545],\"in liquidation\") OR IsEqual([OFST020545],\"terminated\")) and IsNotEmpty([OFST020562]) and [OFST020563] < [OFST020562]": "invalid_when_true",
+ "(IsEqual([OFST160100],\"Company With Fixed Capital (SICAF)\") or IsEqual([OFST160100],\"Company With Variable Capital (SICAV)\")) and IsEqual([OFST160150],\"SICAR\")": "invalid_when_true"
+}

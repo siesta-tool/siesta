@@ -936,23 +936,8 @@ class Analysing(SiestaModule):
                 raise FileNotFoundError(f"Input file {input_path} not found.")
             source = input_path
 
-        summary = run_form_analysis(
-            source,
-            self.analyser_config["output_path"],
-            header_row=self.analyser_config.get("header_row", 1),
-            sheet_name=self.analyser_config.get("sheet_name", 0),
-            date_grouping=self.analyser_config.get("date_grouping", "none"),
-            numeric_bins=self.analyser_config.get("numeric_bins", 5),
-            retain_threshold=self.analyser_config.get("retain_threshold", 0.05),
-            drop_constant=self.analyser_config.get("drop_constant", True),
-            drop_unique=self.analyser_config.get("drop_unique", True),
-        )
-
+        summary = self._preprocess_form(source)
         output_path = summary["output_path"]
-        logger.info(
-            f"Completed. {summary['event_count']} event(s) across {summary['trace_count']} trace(s) "
-            f"written to {output_path}."
-        )
 
         mined_path, mined_header, mined_rows = None, None, None
         if self.analyser_config.get("mine", False):
@@ -980,6 +965,25 @@ class Analysing(SiestaModule):
         if mined_path is not None:
             return {"output_path": output_path, "mined": [dict(zip(mined_header, row)) for row in mined_rows]}
         return output_path
+
+    def _preprocess_form(self, source: Any) -> Dict[str, Any]:
+        """Turn a form spreadsheet into a trace CSV using the loaded form-analysis config."""
+        summary = run_form_analysis(
+            source,
+            self.analyser_config["output_path"],
+            header_row=self.analyser_config.get("header_row", 1),
+            sheet_name=self.analyser_config.get("sheet_name", 0),
+            date_grouping=self.analyser_config.get("date_grouping", "none"),
+            numeric_bins=self.analyser_config.get("numeric_bins", 5),
+            retain_threshold=self.analyser_config.get("retain_threshold", 0.05),
+            drop_constant=self.analyser_config.get("drop_constant", True),
+            drop_unique=self.analyser_config.get("drop_unique", True),
+        )
+        logger.info(
+            f"Completed. {summary['event_count']} event(s) across {summary['trace_count']} trace(s) "
+            f"written to {summary['output_path']}."
+        )
+        return summary
 
     def _run_form_analysis_existing(self, caller: str) -> Any:
         """Mine an already-indexed log directly, skipping preprocessing.

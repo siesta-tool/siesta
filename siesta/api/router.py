@@ -49,8 +49,13 @@ def startup(siestaInstance: Siesta) -> None:
                     raise ValueError(f"Unsupported API method: {method}")
 
         app.include_router(module_router)
-    
-    
+
+    # Fundinfo pipeline runs, served next to the FundInfo module's routes.
+
+    from fundinfo.api.app import router as fundinfo_router, runner as fundinfo_runner
+    app.include_router(fundinfo_router, prefix="/fundinfo", tags=["fundinfo"])
+    fundinfo_runner.start()
+
     health_router = APIRouter(tags=["health"])
     @health_router.get("/health")
     def health_check():
