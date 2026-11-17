@@ -129,7 +129,7 @@ class FormAnalysisConfig(BaseModel):
     input_path: str | None = Field(None, description="Path to the local .xlsx file (CLI only; the API takes an upload)")
     header_row: int = Field(1, description="Zero-indexed row of the sheet holding the column names")
     sheet_name: str | int = Field(0, description="Sheet name or zero-indexed sheet position")
-    date_grouping: str = Field("dow", description=f"Bucketing applied to date columns. One of {list(DATE_GROUPINGS)}")
+    date_grouping: str = Field("none", description=f"Bucketing applied to date columns; 'none' drops them. One of {list(DATE_GROUPINGS)}")
     numeric_bins: int = Field(5, description="Number of equal-width buckets for numeric columns")
     retain_threshold: float = Field(0.05, ge=0.0, le=1.0, description="Columns whose distinct-value ratio exceeds this are collapsed to filled/unfilled")
     drop_constant: bool = Field(True, description="Drop columns holding a single distinct value")
@@ -425,6 +425,10 @@ class Analysing(SiestaModule):
         analyser_config: Annotated[str, Form(
             description="JSON configuration object - see endpoint description for all supported fields.",
             openapi_examples={
+                "drop_dates": {
+                    "summary": "Drop date columns",
+                    "value": '{"log_name": "forms", "numeric_bins": 5}',
+                },
                 "dow": {
                     "summary": "Bucket date columns by day of week",
                     "value": '{"log_name": "forms", "date_grouping": "dow", "numeric_bins": 5}',
@@ -440,7 +444,7 @@ class Analysing(SiestaModule):
         """ Extracting pairwise rules from form data inputs.
 
         Columns are reduced first: constant and all-distinct columns are dropped,
-        date columns are bucketed according to `date_grouping`, numeric columns are
+        date columns are dropped (or bucketed via `date_grouping`), numeric columns are
         cut into `numeric_bins` equal-width buckets, and columns with more than
         `retain_threshold` distinct values collapse to `filled` / unfilled.
 
@@ -465,8 +469,8 @@ class Analysing(SiestaModule):
         - `log_name` *(str, default: `"form_log"`)* - name used for the produced trace log.
         - `header_row` *(int, default: `1`)* - zero-indexed row of the sheet holding the column names.
         - `sheet_name` *(str | int, default: `0`)* - sheet name or zero-indexed sheet position.
-        - `date_grouping` *(str, default: `"dow"`)* - bucketing for date columns:
-            `"dow"`, `"month"`, `"quarter"`, `"year"`, `"hour"`, `"date"`, or `"none"` (drops them).
+        - `date_grouping` *(str, default: `"none"`)* - handling of date columns: `"none"` drops them;
+            `"dow"`, `"month"`, `"quarter"`, `"year"`, `"hour"` or `"date"` buckets them instead.
         - `numeric_bins` *(int, default: `5`)* - equal-width buckets for numeric columns.
         - `retain_threshold` *(float [0,1], default: `0.05`)* - above this distinct-value ratio a column
             collapses to `filled` / unfilled; at or below it the values are kept verbatim.
@@ -932,23 +936,8 @@ class Analysing(SiestaModule):
                 raise FileNotFoundError(f"Input file {input_path} not found.")
             source = input_path
 
-        summary = run_form_analysis(
-            source,
-            self.analyser_config["output_path"],
-            header_row=self.analyser_config.get("header_row", 1),
-            sheet_name=self.analyser_config.get("sheet_name", 0),
-            date_grouping=self.analyser_config.get("date_grouping", "dow"),
-            numeric_bins=self.analyser_config.get("numeric_bins", 5),
-            retain_threshold=self.analyser_config.get("retain_threshold", 0.05),
-            drop_constant=self.analyser_config.get("drop_constant", True),
-            drop_unique=self.analyser_config.get("drop_unique", True),
-        )
-
+        summary = self._preprocess_form(source)
         output_path = summary["output_path"]
-        logger.info(
-            f"Completed. {summary['event_count']} event(s) across {summary['trace_count']} trace(s) "
-            f"written to {output_path}."
-        )
 
         mined_path, mined_header, mined_rows = None, None, None
         if self.analyser_config.get("mine", False):
@@ -976,6 +965,25 @@ class Analysing(SiestaModule):
         if mined_path is not None:
             return {"output_path": output_path, "mined": [dict(zip(mined_header, row)) for row in mined_rows]}
         return output_path
+
+    def _preprocess_form(self, source: Any) -> Dict[str, Any]:
+        """Turn a form spreadsheet into a trace CSV using the loaded form-analysis config."""
+        summary = run_form_analysis(
+            source,
+            self.analyser_config["output_path"],
+            header_row=self.analyser_config.get("header_row", 1),
+            sheet_name=self.analyser_config.get("sheet_name", 0),
+            date_grouping=self.analyser_config.get("date_grouping", "none"),
+            numeric_bins=self.analyser_config.get("numeric_bins", 5),
+            retain_threshold=self.analyser_config.get("retain_threshold", 0.05),
+            drop_constant=self.analyser_config.get("drop_constant", True),
+            drop_unique=self.analyser_config.get("drop_unique", True),
+        )
+        logger.info(
+            f"Completed. {summary['event_count']} event(s) across {summary['trace_count']} trace(s) "
+            f"written to {summary['output_path']}."
+        )
+        return summary
 
     def _run_form_analysis_existing(self, caller: str) -> Any:
         """Mine an already-indexed log directly, skipping preprocessing.

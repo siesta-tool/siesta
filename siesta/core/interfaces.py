@@ -205,6 +205,36 @@ class StorageManager(ABC):
         pass
     
     @abstractmethod
+    def write_object(self, storage_namespace: str, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+        """
+        Store raw bytes under an exact key, creating the namespace if needed.
+
+        Args:
+            storage_namespace: Namespace (e.g. S3 bucket) to write into
+            key: Full object key, used verbatim
+            data: Object contents
+            content_type: MIME type recorded with the object
+
+        Returns:
+            The URI of the stored object (e.g., s3a://bucket/key)
+        """
+        pass
+
+    @abstractmethod
+    def read_object(self, storage_namespace: str, key: str) -> bytes | None:
+        """
+        Read raw bytes stored under an exact key.
+
+        Args:
+            storage_namespace: Namespace (e.g. S3 bucket) to read from
+            key: Full object key
+
+        Returns:
+            The object contents, or None if the object does not exist
+        """
+        pass
+
+    @abstractmethod
     def write_metadata_table(self, metadata: Any) -> None:
         """
         Persist metadata to the database.

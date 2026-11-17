@@ -4,7 +4,7 @@
   "input_path": "original.xlsx",
   "header_row": 1,
   "sheet_name": 0,
-  "date_grouping": "dow",
+  "date_grouping": "none",
   "numeric_bins": 5,
   "retain_threshold": 0.05,
   "drop_constant": true,

@@ -368,6 +368,23 @@ class S3Manager(StorageManager):
             logger.info(f"Upload failed: {e}")
             raise
     
+    def write_object(self, storage_namespace: str, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+        """Store bytes under an exact key, creating the bucket if it is missing."""
+        self.initialize_db({"storage_namespace": storage_namespace})
+        self.s3_client.put_object(Bucket=storage_namespace, Key=key, Body=data, ContentType=content_type)
+        logger.info(f"Stored '{key}' in bucket '{storage_namespace}'.")
+        return f"s3a://{storage_namespace}/{key}"
+
+    def read_object(self, storage_namespace: str, key: str) -> bytes | None:
+        """Return the bytes stored under an exact key, or None if absent."""
+        try:
+            response = self.s3_client.get_object(Bucket=storage_namespace, Key=key)
+        except ClientError as e:
+            if e.response["Error"]["Code"] in ("NoSuchKey", "NoSuchBucket", "404"):
+                return None
+            raise
+        return response["Body"].read()
+
     def close_spark(self) -> None:
         """Close the Spark connection using sparkManager."""
         SparkManager.shutdown()

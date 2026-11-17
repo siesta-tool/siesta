@@ -21,6 +21,7 @@ COPY siesta/modules/compare/requirements.txt /tmp/req/siesta/modules/compare/req
 COPY siesta/modules/index/requirements.txt /tmp/req/siesta/modules/index/requirements.txt
 COPY siesta/modules/model/requirements.txt /tmp/req/siesta/modules/model/requirements.txt
 COPY siesta/modules/mine/requirements.txt /tmp/req/siesta/modules/mine/requirements.txt
+COPY fundinfo/requirements.txt /tmp/req/fundinfo/requirements.txt
 
 RUN python3.12 -m pip install --prefer-binary \
       -r /tmp/req/siesta/requirements.txt \
@@ -31,7 +32,8 @@ RUN python3.12 -m pip install --prefer-binary \
       -r /tmp/req/siesta/modules/compare/requirements.txt \
       -r /tmp/req/siesta/modules/index/requirements.txt \
       -r /tmp/req/siesta/modules/model/requirements.txt \
-      -r /tmp/req/siesta/modules/mine/requirements.txt && \
+      -r /tmp/req/siesta/modules/mine/requirements.txt \
+      -r /tmp/req/fundinfo/requirements.txt && \
     rm -rf /tmp/req
 
 COPY siesta/dockerbase/API/entrypoint.sh /usr/local/bin/siesta-api-entrypoint.sh
