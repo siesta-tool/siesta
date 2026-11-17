@@ -23,12 +23,14 @@ services:
       - SPARK_USER=spark
       - MPLCONFIGDIR=/tmp/matplotlib
       - SPARK_IVY_DIR=/tmp/.ivy2
-      # Fundinfo pipeline. It indexes and mines through this same API, and reaches
-      # Ollama on the host, which must listen beyond 127.0.0.1.
+      # Fundinfo pipeline. It indexes and mines through this same API and sends
+      # LLM calls to an OpenAI-compatible endpoint such as a LiteLLM proxy.
+      # Set LLM_URL, LLM_MODEL and LLM_API_KEY in .env, never here.
       - SIESTA_API=http://localhost:8000
       - SIESTA_LOG_NAME=${SIESTA_LOG_NAME:-fundinfo_pipeline}
       - LLM_URL=${LLM_URL:-http://host.docker.internal:11434/v1}
       - LLM_MODEL=${LLM_MODEL:-gemma4:e4b}
+      - LLM_API_KEY=${LLM_API_KEY:-}
       # Optional distributed-execution tuning (see sparkManager.py). Commented out so
       # local/non-distributed runs are unaffected; values below are copied from
       # docker-compose-com.yml and are sized for that cluster's hardware, so adjust

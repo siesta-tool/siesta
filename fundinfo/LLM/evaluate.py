@@ -6,6 +6,7 @@ Answers are cached by prompt text, so a rerun only asks about new prompts.
 """
 import argparse
 import json
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -61,8 +62,14 @@ Cell under review:
 Answer with one sentence of reasoning, then the word ANOMALY or OK as the verdict."""
 
 
+# LiteLLM expects a bearer key. Local Ollama needs none.
+
+KEY = os.environ.get("LLM_API_KEY")
+HEADERS = {"Authorization": f"Bearer {KEY}"} if KEY else {}
+
+
 def ask(prompt):
-    response = requests.post(f"{args.llm_url}/chat/completions", timeout=args.timeout, json={
+    response = requests.post(f"{args.llm_url}/chat/completions", timeout=args.timeout, headers=HEADERS, json={
         "model": args.model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,

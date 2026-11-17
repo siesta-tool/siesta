@@ -48,7 +48,7 @@ curl -F workbook=@original.xlsx -F first=7 -F llm_limit=0 localhost:8000/runs
 - **One at a time:** runs share `output/`, the LLM cache and the Siesta log, so they queue.
 - **Run folder:** `output/runs/<id>/` holds the upload, `log.txt`, `run.json` and `results/`. A result is copied only when the run wrote it, so a `first=7` run has no `validation/` results.
 - **Restarts:** queued runs resume. A run that was running is marked failed.
-- **Settings:** `SIESTA_API`, `SIESTA_LOG_NAME`, `LLM_URL` and `LLM_MODEL` apply to every run. Compose reads them from the shell or `.env`.
+- **Settings:** `SIESTA_API`, `SIESTA_LOG_NAME`, `LLM_URL`, `LLM_MODEL` and `LLM_API_KEY` apply to every run. `LLM_API_KEY` is sent as a bearer token, for example to a LiteLLM proxy. Compose reads them from the shell or `.env`.
 - **Networking:** Compose uses host networking, so the container reaches an Ollama bound to `127.0.0.1` and listens on `API_PORT` (default 8000) of the host.
 - **Volume:** `./output` is mounted, so the API and command-line runs share caches and the base run.
 

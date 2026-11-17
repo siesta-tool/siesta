@@ -7,6 +7,7 @@ Answers are cached by prompt text, in the same cache as evaluate.py.
 import argparse
 import csv
 import json
+import os
 import re
 from collections import defaultdict
 from pathlib import Path
@@ -47,8 +48,14 @@ Do not tell the person what to do to fix it.
 Use the full field names exactly as written above, never field codes or formulas."""
 
 
+# LiteLLM expects a bearer key. Local Ollama needs none.
+
+KEY = os.environ.get("LLM_API_KEY")
+HEADERS = {"Authorization": f"Bearer {KEY}"} if KEY else {}
+
+
 def ask(prompt):
-    response = requests.post(f"{args.llm_url}/chat/completions", timeout=600, json={
+    response = requests.post(f"{args.llm_url}/chat/completions", timeout=600, headers=HEADERS, json={
         "model": args.model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
