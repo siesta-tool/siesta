@@ -103,8 +103,24 @@ is usually simpler.
 ## Build (maintainers)
 
 The image is published for `linux/amd64` and `linux/arm64` (Apple Silicon, ARM servers), on
-Docker Hub (`balaktsis/siesta`) and on GitHub Packages (`ghcr.io/siesta-tool/siesta`). Pushing
-needs `docker login` for Docker Hub, and for ghcr.io a token with `write:packages`
+Docker Hub (`balaktsis/siesta`) and on GitHub Packages (`ghcr.io/siesta-tool/siesta`).
+
+### Releasing
+
+Releases are published by the [`Docker image`](../../../.github/workflows/docker-image.yml)
+workflow whenever the `package` branch moves:
+
+1. On `main`, bump [`VERSION`](VERSION) (e.g. `4.0.0` → `4.0.1`).
+2. Merge `main` into `package` and push.
+
+Each architecture is built on its own native runner and checked with
+[`smoke-test.sh`](smoke-test.sh) (index and query a sample log) before anything is pushed.
+The workflow then tags the image as `<VERSION>` and `latest` on both registries. It refuses
+to run if `<VERSION>` is already published, so a forgotten bump never overwrites a release.
+
+### Building by hand
+
+Pushing needs `docker login` for Docker Hub, and for ghcr.io a token with `write:packages`
 (`gh auth token | docker login ghcr.io -u <github-user> --password-stdin`).
 
 ```bash
@@ -113,6 +129,7 @@ docker run --privileged --rm tonistiigi/binfmt --install arm64
 
 siesta/dockerbase/AllInOne/build.sh                      # build both, load locally
 PLATFORMS=linux/amd64 siesta/dockerbase/AllInOne/build.sh   # quick single-arch build
+siesta/dockerbase/AllInOne/smoke-test.sh balaktsis/siesta:latest   # end-to-end check
 
 # Release: push `latest` plus a version tag to both registries
 siesta/dockerbase/AllInOne/build.sh --push \

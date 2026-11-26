@@ -1,0 +1,154 @@
+# Build, test and publish the all-in-one image (balaktsis/siesta, ghcr.io/siesta-tool/siesta)
+# whenever the `package` branch moves, e.g. after merging main into it.
+#
+# Release steps: bump siesta/dockerbase/AllInOne/VERSION on main, then merge main into
+# package. The run fails (and publishes nothing) if that version is already published.
+#
+# Each architecture is built natively on its own runner and smoke-tested before it is
+# pushed by digest; the publish job then tags the multi-architecture image as
+# <VERSION> and latest on Docker Hub and copies it to ghcr.io.
+#
+# One-time setup:
+#   - Repository secret DOCKERHUB_TOKEN: a Docker Hub access token of the account in
+#     DOCKERHUB_USERNAME below, with Read & Write scope.
+#   - ghcr.io package settings > Manage Actions access: siesta-tool/siesta with Write role.
+
+name: Docker image
+
+on:
+  push:
+    branches: [package]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DOCKERHUB_USERNAME: balaktsis
+  DOCKERHUB_REPO: docker.io/balaktsis/siesta
+  GHCR_REPO: ghcr.io/siesta-tool/siesta
+  BAKE_FILE: siesta/dockerbase/AllInOne/docker-bake.hcl
+
+jobs:
+  version:
+    if: github.ref == 'refs/heads/package'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read VERSION and check it is unpublished
+        id: version
+        run: |
+          V=$(tr -d '[:space:]' < siesta/dockerbase/AllInOne/VERSION)
+          if [[ ! "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION '$V' is not MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          if docker buildx imagetools inspect "$DOCKERHUB_REPO:$V" >/dev/null 2>&1; then
+            echo "::error::$DOCKERHUB_REPO:$V is already published. Bump siesta/dockerbase/AllInOne/VERSION on main, then merge into package again."
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      PLATFORMS: ${{ matrix.platform }}
+      REVISION: ${{ github.sha }}
+    steps:
+      # The image is ~10 GB unpacked; the runners' preinstalled toolchains leave too little room.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+                      /usr/local/share/boost /usr/share/swift /usr/local/.ghcup || true
+          docker system prune -af >/dev/null || true
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        env:
+          TAGS: siesta:ci
+        run: docker buildx bake -f "$BAKE_FILE" --load
+
+      - name: Smoke test
+        run: siesta/dockerbase/AllInOne/smoke-test.sh siesta:ci
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Same build, served from the builder's cache, pushed untagged by digest.
+      - name: Push by digest
+        env:
+          TAGS: ""
+        run: |
+          docker image rm siesta:ci
+          docker buildx bake -f "$BAKE_FILE" --metadata-file "$RUNNER_TEMP/meta.json" \
+            --set "siesta.output=type=image,name=$DOCKERHUB_REPO,push-by-digest=true,name-canonical=true,push=true"
+          digest=$(jq -r '.siesta["containerimage.digest"]' "$RUNNER_TEMP/meta.json")
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.runner }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag on Docker Hub and copy to ghcr.io
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          sources=()
+          for digest in *; do sources+=("$DOCKERHUB_REPO@sha256:$digest"); done
+          docker buildx imagetools create -t "$DOCKERHUB_REPO:$VERSION" -t "$DOCKERHUB_REPO:latest" "${sources[@]}"
+          docker buildx imagetools create -t "$GHCR_REPO:$VERSION" -t "$GHCR_REPO:latest" "$DOCKERHUB_REPO:$VERSION"
+          docker buildx imagetools inspect "$GHCR_REPO:$VERSION"
+          echo "Published $VERSION and latest to $DOCKERHUB_REPO and $GHCR_REPO" >> "$GITHUB_STEP_SUMMARY"

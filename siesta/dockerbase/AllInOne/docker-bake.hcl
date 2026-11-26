@@ -43,7 +43,8 @@ target "siesta" {
     MINIO_IMAGE = MINIO_IMAGE
   }
   platforms = split(",", PLATFORMS)
-  tags      = split(",", TAGS)
+  # TAGS="" builds untagged (CI pushes each architecture by digest, then tags the merged image)
+  tags      = TAGS == "" ? [] : split(",", TAGS)
   labels = {
     # GitHub links ghcr.io packages to the repository named here.
     "org.opencontainers.image.source"   = "https://github.com/siesta-tool/siesta"
