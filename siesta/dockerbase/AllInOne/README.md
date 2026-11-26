@@ -102,13 +102,20 @@ is usually simpler.
 
 ## Build (maintainers)
 
+The image is published for `linux/amd64` and `linux/arm64` (Apple Silicon, ARM servers).
+
 ```bash
-# From the repository root
-siesta/dockerbase/AllInOne/build.sh                      # -> balaktsis/siesta:latest
+# Once per boot, to build the non-native architecture under emulation
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+siesta/dockerbase/AllInOne/build.sh                      # build both, load locally
 siesta/dockerbase/AllInOne/build.sh --push balaktsis/siesta:latest balaktsis/siesta:<version>
+PLATFORMS=linux/amd64 siesta/dockerbase/AllInOne/build.sh   # quick single-arch build
 ```
 
-`build.sh` always builds the Spark base locally as `localhost/siesta-spark:4.0.1` from
-`siesta/dockerbase/Spark/Spark.dockerfile`. It never pulls it: the Docker Hub image
-`siesta/spark` is unrelated and broken. MinIO comes from `chainguard/minio:latest`
-(override with `MINIO_IMAGE`). The image contains `siesta/` and `main.py`, but not `config/`.
+`build.sh` runs `docker buildx bake` with [`docker-bake.hcl`](docker-bake.hcl). It builds the
+Spark base from `siesta/dockerbase/Spark/Spark.dockerfile` in the same run and never pulls it:
+the Docker Hub image `siesta/spark` is unrelated and broken. Loading a multi-architecture image
+locally (no `--push`) needs Docker's containerd image store. The emulated half of the build is
+slow, so expect a long first build. MinIO comes from `chainguard/minio:latest` (override with
+`MINIO_IMAGE`). The image contains `siesta/` and `main.py`, but not `config/`.

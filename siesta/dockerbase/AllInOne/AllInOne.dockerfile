@@ -10,8 +10,8 @@
 
 # BASE_IMAGE is the image built from siesta/dockerbase/Spark/Spark.dockerfile.
 # No default on purpose: the short name siesta/spark resolves to an unrelated, broken
-# Docker Hub repository. build.sh builds and passes localhost/siesta-spark:4.0.1,
-# which can never be pulled from Docker Hub.
+# Docker Hub repository. docker-bake.hcl (used by build.sh) sets it to the bake
+# target "spark-base", so the base is built in the same run and never pulled.
 ARG BASE_IMAGE
 ARG MINIO_IMAGE=chainguard/minio:latest
 
