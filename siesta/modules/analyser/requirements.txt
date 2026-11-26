@@ -1,7 +1,7 @@
 pm4py==2.7.19.5
-pyvis
-matplotlib
-networkx
-numpy
-pyarrow>=11.0.0
-pandas
+pyvis==0.3.2
+matplotlib==3.11.2
+networkx==3.7
+numpy==2.5.1
+pyarrow==25.0.0
+pandas==3.0.5

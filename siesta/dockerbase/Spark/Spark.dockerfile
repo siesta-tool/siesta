@@ -45,15 +45,15 @@ RUN apt-get update && \
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 
 RUN python3.12 -m pip install --no-cache-dir \
-    "boto3>=1.26.0" \
-    "kafka-python>=2.0.0" \
-    "pyspark>=4.0.1" \
+    "boto3==1.43.62" \
+    "kafka-python==3.0.9" \
+    "pyspark==4.0.1" \
     "python-multipart==0.0.22" \
     "fastapi[standard]==0.128" \
     "xxhash==3.6.0" \
-    "pyarrow>=11.0.0" \
-    numpy \
-    pandas
+    "pyarrow==25.0.0" \
+    "numpy==2.5.1" \
+    "pandas==3.0.5"
 
 ENV SPARK_CONF_DIR=/opt/spark/conf
 RUN mkdir -p $SPARK_CONF_DIR && \
