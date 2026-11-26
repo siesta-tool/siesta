@@ -102,15 +102,22 @@ is usually simpler.
 
 ## Build (maintainers)
 
-The image is published for `linux/amd64` and `linux/arm64` (Apple Silicon, ARM servers).
+The image is published for `linux/amd64` and `linux/arm64` (Apple Silicon, ARM servers), on
+Docker Hub (`balaktsis/siesta`) and on GitHub Packages (`ghcr.io/siesta-tool/siesta`). Pushing
+needs `docker login` for Docker Hub, and for ghcr.io a token with `write:packages`
+(`gh auth token | docker login ghcr.io -u <github-user> --password-stdin`).
 
 ```bash
 # Once per boot, to build the non-native architecture under emulation
 docker run --privileged --rm tonistiigi/binfmt --install arm64
 
 siesta/dockerbase/AllInOne/build.sh                      # build both, load locally
-siesta/dockerbase/AllInOne/build.sh --push balaktsis/siesta:latest balaktsis/siesta:<version>
 PLATFORMS=linux/amd64 siesta/dockerbase/AllInOne/build.sh   # quick single-arch build
+
+# Release: push `latest` plus a version tag to both registries
+siesta/dockerbase/AllInOne/build.sh --push \
+  balaktsis/siesta:latest balaktsis/siesta:<version> \
+  ghcr.io/siesta-tool/siesta:latest ghcr.io/siesta-tool/siesta:<version>
 ```
 
 `build.sh` runs `docker buildx bake` with [`docker-bake.hcl`](docker-bake.hcl). It builds the

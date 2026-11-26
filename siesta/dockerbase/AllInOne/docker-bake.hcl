@@ -45,7 +45,8 @@ target "siesta" {
   platforms = split(",", PLATFORMS)
   tags      = split(",", TAGS)
   labels = {
-    "org.opencontainers.image.source"   = "https://hub.docker.com/r/balaktsis/siesta"
+    # GitHub links ghcr.io packages to the repository named here.
+    "org.opencontainers.image.source"   = "https://github.com/siesta-tool/siesta"
     "org.opencontainers.image.revision" = REVISION
   }
 }
