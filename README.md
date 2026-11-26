@@ -137,15 +137,27 @@ By default, `docker-compose.yml` runs Spark standalone on a single host: `spark-
 - executor cores, max cores, memory overhead, shuffle partitions and driver host/port are unset,
   so Spark's own defaults apply (one executor per worker using all its cores).
 
-The `SPARK_*` lines in the `siesta-api` service are commented out and pre-filled with the values
-used for multi-node scaling, as a reference. Uncomment and adjust them to tune sizing on a single
-host.
+For distributed execution across multiple machines, use `docker-compose.distributed.yml`: the
+same services as a Docker Swarm stack, with the driver/executor sizing set on `siesta-api`
+(`SPARK_DRIVER_HOST`, `SPARK_DRIVER_PORT`, `SPARK_BLOCKMANAGER_PORT`, `SPARK_DRIVER_MEMORY`,
+`SPARK_EXECUTOR_*`, `SPARK_CORES_MAX`, `SPARK_SHUFFLE_PARTITIONS`) and per-node placement
+constraints (`node.labels.host == node-name-N`). See the comment block at the top of that file for
+node labels, image registry setup and the deploy command
+(`docker stack deploy -c docker-compose.distributed.yml siesta`).
 
-For true distributed execution across multiple machines, use `docker-compose-com.yml` instead: a
-Docker Swarm stack (see the comment block at the top of that file for image registry setup and
-deploy commands) that runs `siesta-api`/`spark-master` on one leader node and one `spark-worker`
-replica per worker node, with the same `SPARK_*` env vars controlling executor/driver sizing
-across the cluster, e.g. `SPARK_CORES_MAX=18 docker stack deploy -c docker-compose-com.yml siesta`.
+### All-in-one image (`balaktsis/siesta`)
+
+A single image with the Siesta API, Spark master + worker and MinIO, for running Siesta without
+cloning the repository:
+
+```bash
+docker run -d --name siesta -e SIESTA_API_PORT=8000 -p 8000:8000 -v siesta-data:/data balaktsis/siesta:latest
+```
+
+Each service is exposed only if its `SIESTA_*_PORT` variable is set. The same `SPARK_*` sizing
+and distributed-execution variables apply. See
+[`siesta/dockerbase/AllInOne/README.md`](siesta/dockerbase/AllInOne/README.md) for configuration,
+the compose example and how to build and push the image.
 
 ## Extending Siesta (developer hints)
 

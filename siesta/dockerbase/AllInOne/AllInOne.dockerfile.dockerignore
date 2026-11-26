@@ -1,0 +1,7 @@
+# Build context for AllInOne.dockerfile: the Siesta package and its entry point.
+*
+!main.py
+!siesta/
+**/__pycache__
+**/*.pyc
+siesta/modules/query/OpenCEP/test/

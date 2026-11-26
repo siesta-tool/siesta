@@ -1,0 +1,222 @@
+# Distributed execution (Docker Swarm). Same services as docker-compose.yml, plus the
+# Spark driver/executor sizing for the API and per-node placement constraints.
+#   1. Label the nodes:   docker node update --label-add host=node-name-1 <node>   (1..4)
+#   2. Make the siesta/* images available on every node (push them to a registry you
+#      control, and point the `image:` fields at it; swarm does not build images).
+#   3. Deploy:            docker stack deploy -c docker-compose.distributed.yml siesta
+
+networks:
+  siesta-net:
+
+services:
+
+  siesta-api:
+    container_name: siesta-api
+    image: siesta/api:latest
+    build:
+      context: .
+      dockerfile: siesta/dockerbase/API/API.dockerfile
+    init: true
+    working_dir: /workspace
+    environment:
+      - SIESTA_PROJECT_ROOT=/workspace
+      - SIESTA_CONFIG=${SIESTA_CONFIG:-/workspace/config/siesta.docker.config.json}
+      - SIESTA_PYTHON_BIN=python3.12
+      - PYSPARK_PYTHON=python3.12
+      - PYSPARK_DRIVER_PYTHON=python3.12
+      - HADOOP_USER_NAME=spark
+      - SPARK_USER=spark
+      - MPLCONFIGDIR=/tmp/matplotlib
+      - SPARK_IVY_DIR=/tmp/.ivy2
+      # Distributed-execution tuning (see sparkManager.py). Sized for the reference
+      # cluster's hardware; adjust them to your workers.
+      - SPARK_DRIVER_HOST=siesta-api
+      - SPARK_DRIVER_PORT=7078
+      - SPARK_BLOCKMANAGER_PORT=7079
+      - SPARK_DRIVER_MEMORY=24g
+      - SPARK_EXECUTOR_MEMORY=7g
+      - SPARK_EXECUTOR_CORES=2
+      - SPARK_EXECUTOR_MEMORY_OVERHEAD=1536m
+      - SPARK_CORES_MAX=18
+      - SPARK_SHUFFLE_PARTITIONS=72
+    volumes:
+      - .:/workspace
+      - spark-ivy-cache:/tmp/.ivy2
+      - ./output:/workspace/output
+    depends_on:
+      - spark-master
+      - spark-worker
+      - minio
+      # - kafka
+    networks:
+      - siesta-net
+    ports:
+      - '8000:8000'
+      - '4040:4040'
+
+  spark-master:
+    container_name: spark-master
+    image: siesta/spark:4.0.1
+    build:
+      context: siesta/dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    environment:
+      - SPARK_USER=spark
+      - LOGS_PATH=/tmp/spark-events
+      - RESULTS_PATH=/tmp/output/
+      - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+      - PYSPARK_PYTHON=/usr/bin/python3.12
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - '7077'
+      - --webui-port
+      - '8085'
+    networks:
+      - siesta-net
+    ports:
+      - '7077:7077'
+      - '8085:8085'
+      - '8084:8081'
+    # Docker swarm placement
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - 'node.labels.host == node-name-1'
+
+  spark-worker:
+    image: siesta/spark:4.0.1
+    build: 
+      context: siesta/dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+        - SPARK_USER=spark
+        - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+        - PYSPARK_PYTHON=/usr/bin/python3.12
+        - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-12}
+        - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-12G}
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - '8082'
+    ports:
+      - '8082:8082'
+    networks:
+      - siesta-net
+    # Docker swarm placement
+    deploy:
+      replicas: 2
+      placement:
+        constraints:
+          - 'node.labels.host == node-name-2'
+  spark-worker2:
+    container_name: spark-worker2
+    image: siesta/spark:4.0.1
+    build: 
+      context: siesta/dockerbase/Spark
+      dockerfile: Spark.dockerfile
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+        - SPARK_USER=spark
+        - SPARK_SUBMIT_OPTS=-Dlog4j.configurationFile=/opt/spark/conf/log4j2.properties
+        - PYSPARK_PYTHON=/usr/bin/python3.12
+        - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-12}
+        - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-12G}
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --webui-port
+      - '8083'
+    ports:
+      - '9084:9084'
+    networks:
+      - siesta-net
+
+  minio:
+    image: chainguard/minio:latest
+    environment:
+      s3_access_key: minioadmin
+      s3_secret_key: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - siesta-net
+    volumes:
+      - minio-data:/data
+    # Docker swarm placement
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - 'node.labels.host == node-name-3'
+
+  zookeeper:
+    container_name: zookeeper
+    image: wurstmeister/zookeeper:latest
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    volumes:
+      - zookeeper_data:/opt/zookeeper-3.4.13/data
+    networks:
+      - siesta-net
+    # Docker swarm placement
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - 'node.labels.host == node-name-4'
+
+  kafka:
+    container_name: kafka
+    image: siesta/kafka:latest
+    build:
+      context: siesta/dockerbase/Kafka
+      dockerfile: Kafka.dockerfile
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INSIDE:PLAINTEXT,OUTSIDE:PLAINTEXT
+      # ADVERTISED_HOST_IP is replaced by the container's gateway IP at runtime
+      KAFKA_ADVERTISED_LISTENERS: INSIDE://:9093,OUTSIDE://ADVERTISED_HOST_IP:9092
+      KAFKA_LISTENERS: INSIDE://:9093,OUTSIDE://:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INSIDE
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # Auto-create topics: format is "topic_name:partitions:replication_factor"
+      # Multiple topics can be separated by commas
+      KAFKA_CREATE_TOPICS: "log_events:1:1,default_log:1:1"
+    depends_on:
+      - zookeeper
+    networks:
+      - siesta-net
+    volumes:
+      - kafka_data:/kafka
+    # Docker swarm placement
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - 'node.labels.host == node-name-4'
+
+
+volumes:
+  minio-data: {}
+  kafka_data: {}
+  zookeeper_data: {}
+  spark-ivy-cache: {}

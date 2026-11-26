@@ -1,0 +1,50 @@
+# Siesta all-in-one (balaktsis/siesta), single host.
+#   cp .env.example .env   # edit ports, passwords, Spark sizing
+#   docker compose up -d
+#
+# Only services whose SIESTA_*_PORT is set listen outside the container. For each
+# one you set, add a matching "<port>:<port>" mapping below, or use
+# `network_mode: host` instead of `ports:`.
+
+services:
+  siesta:
+    image: ${SIESTA_IMAGE:-balaktsis/siesta:latest}
+    container_name: siesta
+    restart: unless-stopped
+    ports:
+      - "${SIESTA_API_PORT:-8000}:${SIESTA_API_PORT:-8000}"
+      # - "${SIESTA_SPARK_UI_PORT}:${SIESTA_SPARK_UI_PORT}"
+      # - "${SIESTA_SPARK_MASTER_PORT}:${SIESTA_SPARK_MASTER_PORT}"
+      # - "${SIESTA_SPARK_MASTER_UI_PORT}:${SIESTA_SPARK_MASTER_UI_PORT}"
+      # - "${SIESTA_SPARK_WORKER_UI_PORT}:${SIESTA_SPARK_WORKER_UI_PORT}"
+      # - "${SIESTA_MINIO_PORT}:${SIESTA_MINIO_PORT}"
+      # - "${SIESTA_MINIO_CONSOLE_PORT}:${SIESTA_MINIO_CONSOLE_PORT}"
+      # - "${SPARK_DRIVER_PORT}:${SPARK_DRIVER_PORT}"
+      # - "${SPARK_BLOCKMANAGER_PORT}:${SPARK_BLOCKMANAGER_PORT}"
+    environment:
+      SIESTA_API_PORT: ${SIESTA_API_PORT:-8000}
+      SIESTA_SPARK_UI_PORT: ${SIESTA_SPARK_UI_PORT:-}
+      SIESTA_SPARK_MASTER_PORT: ${SIESTA_SPARK_MASTER_PORT:-}
+      SIESTA_SPARK_MASTER_UI_PORT: ${SIESTA_SPARK_MASTER_UI_PORT:-}
+      SIESTA_SPARK_WORKER_UI_PORT: ${SIESTA_SPARK_WORKER_UI_PORT:-}
+      SIESTA_MINIO_PORT: ${SIESTA_MINIO_PORT:-}
+      SIESTA_MINIO_CONSOLE_PORT: ${SIESTA_MINIO_CONSOLE_PORT:-}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-8g}
+      SPARK_DAEMON_MEMORY: ${SPARK_DAEMON_MEMORY:-1g}
+      SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY:-4g}
+      SPARK_EXECUTOR_CORES: ${SPARK_EXECUTOR_CORES:-2}
+      SPARK_EXECUTOR_MEMORY: ${SPARK_EXECUTOR_MEMORY:-3g}
+      SPARK_EXECUTOR_MEMORY_OVERHEAD: ${SPARK_EXECUTOR_MEMORY_OVERHEAD:-512m}
+      SPARK_CORES_MAX: ${SPARK_CORES_MAX:-}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-}
+      SPARK_DRIVER_HOST: ${SPARK_DRIVER_HOST:-}
+      SPARK_DRIVER_PORT: ${SPARK_DRIVER_PORT:-}
+      SPARK_BLOCKMANAGER_PORT: ${SPARK_BLOCKMANAGER_PORT:-}
+    volumes:
+      - siesta-data:/data
+
+volumes:
+  siesta-data: {}
